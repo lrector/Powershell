@@ -1,0 +1,32 @@
+Get info from INI file (BuildList.ps1)
+Get data from database (ReadCFG.ps1)
+Build transfer files (BuildList.ps1
+			CompareFiles.ps1)
+Get list of attachments from host (CompareFiles.ps1)
+Get list of attachments from client (CompareFiles.ps1)
+Compare lists and build catchup batchfile (CompareFiles.ps1)
+Run catchup batchfile
+RAR and ship catchup to host
+
+
+Variables Needed (with source)
+$Data (info.ini)
+	$County
+	$User
+	$Pass
+	$DB
+	$TForms
+	$AForms
+		$FileName1 $County + host.txt
+		$FileName2 $County + local.txt
+$conn Connection String
+$rdr Data reader
+	$cmdText1 = "SELECT CfgValue FROM tTS_Cfg WHERE CfgName = 'TSFILE1'"
+	$cmdText2 = "SELECT CfgValue FROM tTS_Cfg WHERE CfgName = 'TSFILE2'"
+	$cmdText3 = "SELECT CfgValue FROM tTS_Cfg WHERE CfgName = 'TR_CountyName'"
+	$cmdText4 = "SELECT CfgValue FROM tTS_Cfg WHERE CfgName = 'TR_SifterFTPList'"
+		$TAttachments (cmdText1)
+		$AAttachments (cmdText2)
+		$County (cmdText3)
+		$CountyReplace (cmdText3 + ftplist.txt)
+		$WorkingDir (cmdText4)

@@ -1,0 +1,83 @@
+H:\PowerShellTest\Attachments.txt;09/16/2010 17:58:55;1358
+H:\PowerShellTest\BinaryDir.ps1;09/15/2010 15:00:07;1534
+H:\PowerShellTest\BinaryFilesReceived.ps1;09/14/2010 16:07:14;464
+H:\PowerShellTest\blat262.full.zip;09/14/2010 15:04:22;151099
+H:\PowerShellTest\bmail.exe;05/03/2004 07:53:30;40960
+H:\PowerShellTest\Copy (4) of New Text Document.bat;05/06/2010 11:39:11;0
+H:\PowerShellTest\CreateTestFolders.ps1;11/03/2010 08:40:22;302
+H:\PowerShellTest\DeleteAttachmentFolders.ps1;05/13/2010 16:07:29;525
+H:\PowerShellTest\deltest.ps1;05/10/2010 09:50:43;181
+H:\PowerShellTest\dir.txt;09/15/2010 14:34:43;477
+H:\PowerShellTest\dir2.ps1;09/15/2010 14:34:43;492
+H:\PowerShellTest\dir2.txt;09/14/2010 16:02:55;0
+H:\PowerShellTest\dir3.ps1;09/14/2010 16:06:47;245
+H:\PowerShellTest\fakebak.bak;05/06/2010 11:39:11;0
+H:\PowerShellTest\fakebat.bat;05/06/2010 11:39:11;0
+H:\PowerShellTest\fakerar.rar;05/06/2010 11:39:11;0
+H:\PowerShellTest\fakerar2.rar;05/06/2010 11:39:11;0
+H:\PowerShellTest\FileList.ps1;11/16/2010 10:46:00;114
+H:\PowerShellTest\FindEmpty.ps1;11/03/2010 09:28:34;730
+H:\PowerShellTest\FindEmpty2.ps1;11/03/2010 09:42:45;183
+H:\PowerShellTest\source.txt;05/06/2010 11:39:11;0
+H:\PowerShellTest\Stringmanip.txt;09/16/2010 16:00:53;66
+H:\PowerShellTest\TestBlat.bat;09/15/2010 08:38:18;174
+H:\PowerShellTest\TestBmail.bat;09/15/2010 14:24:42;130
+H:\PowerShellTest\TestEmail.ps1;09/14/2010 16:16:51;912
+H:\PowerShellTest\01\11001\fakerar.rar;05/06/2010 11:39:11;0
+H:\PowerShellTest\01\11001\fakerar2.rar;05/06/2010 11:39:11;0
+H:\PowerShellTest\01\11001\source.txt;05/06/2010 11:39:11;0
+H:\PowerShellTest\01\11001\Stringmanip.txt;09/16/2010 16:00:53;66
+H:\PowerShellTest\01\11001\TestEmail.ps1;09/14/2010 16:16:51;912
+H:\PowerShellTest\01\11010\fakerar.rar;05/06/2010 11:39:11;0
+H:\PowerShellTest\01\11010\fakerar2.rar;05/06/2010 11:39:11;0
+H:\PowerShellTest\01\11010\source.txt;05/06/2010 11:39:11;0
+H:\PowerShellTest\01\11010\Stringmanip.txt;09/16/2010 16:00:53;66
+H:\PowerShellTest\01\11010\TestEmail.ps1;09/14/2010 16:16:51;912
+H:\PowerShellTest\01\11011\fakerar.rar;05/06/2010 11:39:11;0
+H:\PowerShellTest\01\11011\fakerar2.rar;05/06/2010 11:39:11;0
+H:\PowerShellTest\01\11011\source.txt;05/06/2010 11:39:11;0
+H:\PowerShellTest\01\11011\Stringmanip.txt;09/16/2010 16:00:53;66
+H:\PowerShellTest\01\11011\TestEmail.ps1;09/14/2010 16:16:51;912
+H:\PowerShellTest\02\30000\fakerar.rar;05/06/2010 11:39:11;0
+H:\PowerShellTest\02\30000\fakerar2.rar;05/06/2010 11:39:11;0
+H:\PowerShellTest\02\30000\source.txt;05/06/2010 11:39:11;0
+H:\PowerShellTest\02\30000\Stringmanip.txt;09/16/2010 16:00:53;66
+H:\PowerShellTest\02\30000\TestEmail.ps1;09/14/2010 16:16:51;912
+H:\PowerShellTest\blat262\docs\ChangeLog.txt;02/25/2007 10:49:00;38068
+H:\PowerShellTest\blat262\docs\changes-194.txt;06/20/2003 08:30:00;14186
+H:\PowerShellTest\blat262\docs\credits.html;06/23/2003 12:56:00;1484
+H:\PowerShellTest\blat262\docs\file_id.diz;06/30/2003 21:04:00;198
+H:\PowerShellTest\blat262\docs\license.txt;06/20/2003 08:06:00;1169
+H:\PowerShellTest\blat262\docs\readme.txt;09/18/2005 15:49:00;1881
+H:\PowerShellTest\blat262\docs\syntax.html;03/23/2007 14:27:34;11731
+H:\PowerShellTest\blat262\docs\syntax.txt;03/23/2007 14:27:34;10389
+H:\PowerShellTest\blat262\docs\cgi\blat-cgi.htm;10/10/2003 12:01:00;5023
+H:\PowerShellTest\blat262\docs\cgi\blat-fail.htm;06/10/2002 15:37:00;69
+H:\PowerShellTest\blat262\docs\cgi\blat-success.htm;06/10/2002 15:37:00;76
+H:\PowerShellTest\blat262\full\blat.dll;02/25/2007 11:06:38;122880
+H:\PowerShellTest\blat262\full\blat.exe;02/25/2007 11:06:22;115200
+H:\PowerShellTest\blat262\full\blat.lib;02/25/2007 11:06:38;2174
+H:\PowerShellTest\blat262\full\dir.txt;09/14/2010 14:56:57;140
+H:\PowerShellTest\blat262\full\TestBlat.bat;09/14/2010 15:35:09;153
+H:\PowerShellTest\Catchup Attachments\CompareAttachments.ps1;10/12/2010 14:47:38;3346
+H:\PowerShellTest\Catchup Attachments\Info.ini;10/08/2010 13:44:26;154
+H:\PowerShellTest\Catchup Attachments\Stevensattachments.txt;10/08/2010 11:10:42;1093497
+H:\PowerShellTest\Catchup Attachments\Stevenshost.txt;10/08/2010 11:10:37;80
+H:\PowerShellTest\Catchup Attachments\Test.bat;10/08/2010 15:31:07;15
+H:\PowerShellTest\Catchup Attachments\WorkOverview.txt;09/27/2010 09:50:45;1022
+H:\PowerShellTest\FileCompTest\attachments.txt;09/16/2010 18:01:09;1089134
+H:\PowerShellTest\FileCompTest\CompareFiles.ps1;09/24/2010 12:10:55;1356
+H:\PowerShellTest\FileCompTest\CompareList.ps1;09/16/2010 17:29:28;215
+H:\PowerShellTest\FileCompTest\Diff.txt;09/17/2010 08:43:54;2312
+H:\PowerShellTest\FileCompTest\GetHostFiles.ps1;09/16/2010 17:31:04;29
+H:\PowerShellTest\FileCompTest\GetLocalAttachments.ps1;09/16/2010 17:28:18;310
+H:\PowerShellTest\FileCompTest\LocalAttachments.txt;09/16/2010 17:16:25;1089518
+H:\PowerShellTest\FileCompTest\ReadCFG.ps1;09/20/2010 16:54:32;1459
+H:\PowerShellTest\FileCompTest\StevensAttachments.txt;09/17/2010 13:26:46;1089518
+H:\PowerShellTest\FileCompTest\stevensattachmentsORIG.txt;09/16/2010 17:16:25;1089518
+H:\PowerShellTest\FileCompTest\StevensftpHostList.txt;09/16/2010 13:46:25;80
+H:\PowerShellTest\FileCompTest\Stringmanip.ps1;09/16/2010 16:38:54;223
+H:\PowerShellTest\FileCompTest\test.txt;09/24/2010 14:54:17;248
+H:\PowerShellTest\ReadInfoFromFile\BuildList.ps1;09/24/2010 14:54:15;964
+H:\PowerShellTest\ReadInfoFromFile\Info.ini;09/24/2010 13:21:53;151
+H:\PowerShellTest\ReadInfoFromFile\Stevenshost.txt;09/24/2010 14:54:17;56

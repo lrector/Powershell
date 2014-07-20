@@ -1,0 +1,9 @@
+DEL D:\Client\WA\Adams\Mapsifter\Website\Print\Images\*.jpg
+DEL D:\Client\WA\Douglas\Mapsifter\Website\Print\Images\*.jpg
+DEL D:\Client\WA\Franklin\Mapsifter\Website\Print\Images\*.jpg
+DEL D:\Client\WA\Grant\Mapsifter\Website\Print\Images\*.jpg
+DEL D:\Client\WA\Lincoln\Mapsifter\Website\Print\Images\*.jpg
+DEL D:\Client\WA\Okanogan\Mapsifter\Website\Print\Images\*.jpg
+DEL D:\Client\WA\Pacific\Mapsifter\Website\Print\Images\*.jpg
+DEL D:\Client\WA\Stevens\Mapsifter\Website\Print\Images\*.jpg
+DEL D:\Client\WA\WallaWalla\Mapsifter\Website\Print\Images\*.jpg

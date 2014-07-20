@@ -1,0 +1,2 @@
+ni Diff.txt -force -type "File"
+Compare-Object $(Get-Content stevensattachments.txt) $(Get-Content LocalAttachments.txt) | %{$_ -replace "@{InputObject=",""} | %{$_ -replace "; SideIndicator==>}", ""} | ac Diff.txt

@@ -1,0 +1,6 @@
+open ftp.taxsifter.com
+StevensWAT2
+14FE69D
+get stevensattachments.txt
+
+quit

@@ -1,0 +1,12 @@
+11001\source.txt
+11001\Stringmanip.txt
+11001\TestEmail.ps1
+11010\source.txt
+11010\Stringmanip.txt
+11010\TestEmail.ps1
+11011\source.txt
+11011\Stringmanip.txt
+11011\TestEmail.ps1
+30000\source.txt
+30000\Stringmanip.txt
+30000\TestEmail.ps1

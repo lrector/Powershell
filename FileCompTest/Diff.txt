@@ -1,0 +1,17 @@
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\771\22\77122.pdf H:\PowershellTest\FileCompTest\Overnight\11010\771\22\77122.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\771\32\77132.pdf H:\PowershellTest\FileCompTest\Overnight\11010\771\32\77132.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\771\33\77133.pdf H:\PowershellTest\FileCompTest\Overnight\11010\771\33\77133.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\771\39\77139.pdf H:\PowershellTest\FileCompTest\Overnight\11010\771\39\77139.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\771\40\77140.pdf H:\PowershellTest\FileCompTest\Overnight\11010\771\40\77140.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\771\41\77141.pdf H:\PowershellTest\FileCompTest\Overnight\11010\771\41\77141.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\771\97\77197.pdf H:\PowershellTest\FileCompTest\Overnight\11010\771\97\77197.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\771\98\77198.pdf H:\PowershellTest\FileCompTest\Overnight\11010\771\98\77198.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\771\99\77199.pdf H:\PowershellTest\FileCompTest\Overnight\11010\771\99\77199.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\772\45\77245.pdf H:\PowershellTest\FileCompTest\Overnight\11010\772\45\77245.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\772\91\77291.pdf H:\PowershellTest\FileCompTest\Overnight\11010\772\91\77291.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\773\05\77305.pdf H:\PowershellTest\FileCompTest\Overnight\11010\773\05\77305.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\773\71\77371.pdf H:\PowershellTest\FileCompTest\Overnight\11010\773\71\77371.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\774\56\77456.pdf H:\PowershellTest\FileCompTest\Overnight\11010\774\56\77456.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\774\69\77469.pdf H:\PowershellTest\FileCompTest\Overnight\11010\774\69\77469.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\774\79\77479.pdf H:\PowershellTest\FileCompTest\Overnight\11010\774\79\77479.pdf /y
+ECHO F| XCOPY H:\PowershellTest\FileCompTest\11010\775\29\77529.pdf H:\PowershellTest\FileCompTest\Overnight\11010\775\29\77529.pdf /y

@@ -1,0 +1,1 @@
+ls -recurse | WHERE {!$_.PSIsContainer} | %{$_.FullName + ";" + $_.LastWriteTime + ";" + $_.Length} | ac files.txt
