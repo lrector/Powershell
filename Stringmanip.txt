@@ -1,0 +1,1 @@
+Select-String stevensattachments.txt -Pattern '11010' -SimpleMatch

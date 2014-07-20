@@ -1,0 +1,8 @@
+/FerryWA
+/FranklinWA
+/GrantWA
+/LincolnWA
+/MasonWA
+/OkanoganWA
+/StevensWA
+/WhitmanWA
