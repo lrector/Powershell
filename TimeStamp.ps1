@@ -1,0 +1,1 @@
+dir g:\powershelltest | where {$_.LastWriteTime -lt (date).addminutes(-15)}

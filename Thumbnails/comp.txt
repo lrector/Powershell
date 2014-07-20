@@ -1,0 +1,8 @@
+@{InputObject=H:\PowerShellTest\Thumbnails\346\09\34609; SideIndicator=<=}
+@{InputObject=H:\PowerShellTest\Thumbnails\346\11\34611; SideIndicator=<=}
+@{InputObject=H:\PowerShellTest\Thumbnails\346\12\34612; SideIndicator=<=}
+@{InputObject=H:\PowerShellTest\Thumbnails\346\13\34613; SideIndicator=<=}
+@{InputObject=H:\PowerShellTest\Thumbnails\862\61\86261; SideIndicator=<=}
+@{InputObject=H:\PowerShellTest\Thumbnails\862\62\86262; SideIndicator=<=}
+@{InputObject=H:\PowerShellTest\Thumbnails\862\63\86263; SideIndicator=<=}
+@{InputObject=H:\PowerShellTest\Thumbnails\862\64\86264; SideIndicator=<=}
