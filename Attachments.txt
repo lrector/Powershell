@@ -1,0 +1,53 @@
+blat262\docs\cgi\blat-cgi.htm
+blat262\docs\cgi\blat-fail.htm
+blat262\docs\cgi\blat-success.htm
+blat262\docs\ChangeLog.txt
+blat262\docs\changes-194.txt
+blat262\docs\credits.html
+blat262\docs\file_id.diz
+blat262\docs\license.txt
+blat262\docs\readme.txt
+blat262\docs\syntax.html
+blat262\docs\syntax.txt
+blat262\full\blat.dll
+blat262\full\blat.exe
+blat262\full\blat.lib
+blat262\full\dir.txt
+blat262\full\TestBlat.bat
+FileCompTest\CompareFiles.ps1
+FileCompTest\CompareList.ps1
+FileCompTest\Diff.txt
+FileCompTest\GetHostFiles.ps1
+FileCompTest\GetLocalAttachments.ps1
+FileCompTest\LocalAttachments.txt
+FileCompTest\StevensAtt.txt
+FileCompTest\stevensattachments.txt
+FileCompTest\stevensattachmentsORIG.txt
+FileCompTest\StevensftpHostList.txt
+FileCompTest\Stringmanip.ps1
+test\Copy (1) of New Text Document.txt
+test\Copy (2) of New Text Document.txt
+test\Copy (3) of New Text Document.txt
+test2\Copy (2) of New Text Document.txt
+test3\Copy (3) of New Text Document.txt
+test4\Copy (4) of New Text Document.txt
+Attachments.txt
+BinaryDir.ps1
+BinaryFilesReceived.ps1
+blat262.full.zip
+bmail.exe
+Copy (4) of New Text Document.bat
+CreateTestFolders.ps1
+DeleteAttachmentFolders.ps1
+deltest.ps1
+dir.txt
+dir2.ps1
+dir2.txt
+dir3.ps1
+fakebak.bak
+fakebat.bat
+source.txt
+Stringmanip.txt
+TestBlat.bat
+TestBmail.bat
+TestEmail.ps1
