@@ -164,3 +164,5 @@ function PromptWithCheckboxesAndRadionbuttons(
 
   return $caller.Data
 }
+
+PromptWithCheckboxesAndRadionbuttons ("Testing","Type Some Stuff",$Null)
