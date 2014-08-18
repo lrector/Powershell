@@ -1,3 +1,3 @@
-DEL Script*.gms
-DEL Slurp*.cmd
-DEL Batch*.bat
+DEL Out\Script*.gms
+DEL Out\Slurp*.cmd
+DEL Out\Batch*.bat
