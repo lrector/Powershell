@@ -1,16 +1,16 @@
 CLS
 $Row = 0
 $Column = 0
-$Rows = 10
-$Columns = 10
-$Level = 21
+$Rows = 2
+$Columns = 4
+$Level = 20
 $Levels = 1
-$Client = "Kearney"
+$Client = "Scottsbluff"
 #Eventually turn these into parameters
-$N = 4983927.676
-$S = 4955095.066
-$W = -11057023.612
-$E = -10998872.790
+$N = 5168143.722
+$S = 5109687.709
+$W = -11609000.828 
+$E = -11481493.089
 
 $YInterval = ($N - $S) / $Rows
 $XInterval = ($W - $E) / $Columns
@@ -31,7 +31,7 @@ WHILE ($Row -le $Rows)
 		$X1 = $W - ($XInterval * $Column) + $XOffset
 		$X2 = $W - ($XInterval * ($Column + 1)) - $XOffset
 		
-		$CellScript = $Script + "EXPORT_WEB FILENAME=`"f:\Tiles\$Client\L$Level-R$Row-C$Column\map.htm`" TYPE=VIRTUAL_EARTH MAX_ZOOM_LEVEL=$Level NUM_ZOOM_LEVELS=$Level IMAGE_FORMAT=JPG GLOBAL_BOUNDS=`"$X1,$Y1,$X2,$Y2`""
+		$CellScript = $Script + "EXPORT_WEB FILENAME=`"f:\Tiles\$Client\L$Level-R$Row-C$Column\map.htm`" TYPE=VIRTUAL_EARTH MAX_ZOOM_LEVEL=$Level NUM_ZOOM_LEVELS=$Levels IMAGE_FORMAT=JPG GLOBAL_BOUNDS=`"$X1,$Y1,$X2,$Y2`""
 		
 		$SlurpCmd = "globalmappertoquadtree -from F:\Tiles\$Client\L$Level-R$Row-C$Column\ -to e:\Tiles\NE\$Client\20140808_Kearney2013 -m -s"
 		
