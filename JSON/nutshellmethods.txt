@@ -1,0 +1,7 @@
+"findBackups":{"envelope":"JSON-RPC-2.0","transport":"POST","parameters":[],"returns":"array"}
+
+"listBackups":{"envelope":"JSON-RPC-2.0","transport":"POST","parameters":[],"returns":"null"}
+
+"newBackup":{"envelope":"JSON-RPC-2.0","transport":"POST","parameters":[],"returns":"object"}
+
+"startBackup":{"envelope":"JSON-RPC-2.0","transport":"POST","parameters":[],"returns":"null"}

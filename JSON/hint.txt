@@ -1,0 +1,8 @@
+bool Equals(System.Object obj)
+int GetHashCode()
+type GetType()
+string ToString()
+ error=null
+System.String id=apeye
+System.String jsonrpc=2.0
+System.Management.Automation.PSCustomObject result=@{iphone=app.nutshell.com; mobile=app.nutshell.com; api=app01.nutshell.com; login=app.nutshell.com}
