@@ -1,6 +1,10 @@
 USE [master];
 GO
 
+IF EXISTS(SELECT * FROM sys.databases WHERE compatibility_level < 90)
+	RAISERROR ('sp_Blitz cannot be installed when databases are still in 2000 compatibility mode. For information: http://BrentOzar.com/blitz/', 20,1) WITH LOG, NOWAIT;
+GO
+
 IF OBJECT_ID('dbo.sp_Blitz') IS NULL
   EXEC ('CREATE PROCEDURE dbo.sp_Blitz AS RETURN 0;')
 GO
@@ -31,19 +35,18 @@ ALTER PROCEDURE [dbo].[sp_Blitz]
 AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-	SELECT @Version = 41, @VersionDate = '20150618'
+	SELECT @Version = 42, @VersionDate = '20150907'
 
 	IF @Help = 1 PRINT '
 	/*
-	sp_Blitz (TM) v41 - June 18, 2015
+	sp_Blitz (TM) v42 - September 7, 2015
 
 	(C) 2015, Brent Ozar Unlimited.
 	See http://BrentOzar.com/go/eula for the End User Licensing Agreement.
 
 	To learn more, visit http://www.BrentOzar.com/blitz where you can download
 	new versions for free, watch training videos on how it works, get more info on
-	the findings, and more.  To contribute code and see your name in the change
-	log, email your improvements & checks to Help@BrentOzar.com.
+	the findings, and more.
 
 	To request a feature or change: http://support.brentozar.com/
 	To contribute code: http://www.brentozar.com/contributing-code/
@@ -58,22 +61,29 @@ AS
 	Unknown limitations of this version:
 	 - None.  (If we knew them, they would be known. Duh.)
 
+   	Changes in v42 - September 7, 2015
+      - Added check 163 for SQL Server 2016 databases with Query Store disabled.
+     - Added a few ignorable waits.
+     - Do not say no-significant-waits-found if we detected poison waits.
+     - Stop people from trying to install it in SQL Server 2000 compat mode.
+     - Bug fixes.
+
    	Changes in v41 - June 18, 2015
      - Added check 162 for CMEMTHREAD waits on servers with >= 8 logical
-	   processors per NUMA node.
-	 - Added check 159 for NUMA nodes reporting dangerously low memory in
-	   sys.dm_os_nodes.
-	 - Added check 161 for a high number of cached plans per KB 3026083.
+        processors per NUMA node.
+     - Added check 159 for NUMA nodes reporting dangerously low memory in
+        sys.dm_os_nodes.
+     - Added check 161 for a high number of cached plans per KB 3026083.
      - Fixed a bug in the SkipChecks routines. Reported by Kevin Collins.
      - Backup-to-same-drive-as-databases check (93) now includes the number of
-	   backups that were done so you can tell if it was a one-off problem, or if
-	   all backups are going to the wrong place.
+        backups that were done so you can tell if it was a one-off problem, or if
+        all backups are going to the wrong place.
      - Bug fixes and improvements.
 
   	Changes in v40 - April 27, 2015
 	 - Added check 158 for 1MB growth sizes on databases over 10GB. Probably time
        to up that growth size. Contributed by Henrik Staun Poulsen.
-     - Added check 159 for queries with more than 50 execution plans in cache,
+     - Added check 160 for queries with more than 50 execution plans in cache,
        an indicator that it is not parameterized properly.
      - Fixed check 97 that said Data Center Edition was subject to CPU and
        memory limits, which is not true. It is only subject to wallet limits.
@@ -85,32 +95,8 @@ AS
        workaround in the next statement, but Julie Citro spotted the bug and
        made it right. First check, people. All of you who ever read this code,
        Julie Citro is officially a better code reviewer than you.
-  	 - Skip backup checks on offline databases.
-  	 - For order and join hints, raised threshold to 1000 instead of 1.
-	 
-  	Changes in v39 - February 16, 2015
-	 - Added @OutputType option for NONE if you only want to log the results to
-	    a table. (For Jefferson Elias.)
-  	 - Bug fixes and improvements. (Thanks, Nathan Sunderman.)
-
- 	Changes in v38 - November 20, 2014
- 	 - Added check 157 for dangerous builds of SQL Server that are affected by
- 	   MS Security Bulletin MS14-044.
-	 - Added current date to output as check 156, priority 254. Requested by
-	   Denise Crabtree, who runs sp_Blitz on a regular basis and saves the
-	   results in a spreadsheet. Yay, Denise!
-	 - Bug fixes and improvements to wait stats checks.
-
- 	Changes in v37 - November 19, 2014
-	 - Added wait stats checks when @CheckServerInfo = 1. Check 152 looks for
-	   waits that have accounted for more than 10% of minimum possible wait
-	   time. If your 4-core server has been up for 40 hours, that is 160 hours
-	   of potential wait time (and of course it could be much higher when
-	   multiple queries are stacked up on each core.) In that case, we only
-	   alert on waits that have accounted for at least 16 hours of wait time.
-	   We are trying to avoid false-alarming when servers are sitting idle.
-	 - Added check 154 for 32-bit SQL Servers.
-	 - Added check 155 for sp_Blitz versions more than 6 months old.
+     - Skip backup checks on offline databases.
+     - For order and join hints, raised threshold to 1000 instead of 1.
 
 	For prior changes, see: http://www.BrentOzar.com/blitz/changelog/
 
@@ -3205,6 +3191,33 @@ AS
 						CLOSE DatabaseDefaultsLoop
 						DEALLOCATE DatabaseDefaultsLoop;
 							
+
+						IF NOT EXISTS ( SELECT  1
+										FROM    #SkipChecks
+										WHERE   DatabaseName IS NULL AND CheckID = 163 )
+                            AND EXISTS(SELECT * FROM sys.all_objects WHERE name = 'database_query_store_options')
+							BEGIN
+								EXEC dbo.sp_MSforeachdb 'USE [?];
+			INSERT INTO #BlitzResults
+			(CheckID,
+			DatabaseName,
+			Priority,
+			FindingsGroup,
+			Finding,
+			URL,
+			Details)
+		  SELECT TOP 1 163,
+		  ''?'',
+		  10,
+		  ''Performance'',
+		  ''Query Store Disabled'',
+		  ''http://BrentOzar.com/go/querystore'',
+		  (''The new SQL Server 2016 Query Store feature has not been enabled on this database.'')
+		  FROM [?].sys.database_query_store_options WHERE desired_state = 0 AND ''?'' NOT IN (''master'', ''model'', ''msdb'', ''tempdb'', ''ReportServer'', ''ReportServerTempDB'')';
+							END
+
+
+
 				IF @CheckUserDatabaseObjects = 1
 					BEGIN
 
@@ -3262,7 +3275,7 @@ AS
 
 						IF NOT EXISTS ( SELECT  1
 										FROM    #SkipChecks
-										WHERE   DatabaseName IS NULL AND CheckID = 159 )
+										WHERE   DatabaseName IS NULL AND CheckID = 164 )
                             AND EXISTS(SELECT * FROM sys.all_objects WHERE name = 'fn_validate_plan_guide')
 							BEGIN
 								EXEC dbo.sp_MSforeachdb 'USE [?];
@@ -3274,7 +3287,7 @@ AS
 			Finding,
 			URL,
 			Details)
-		  SELECT DISTINCT 159,
+		  SELECT DISTINCT 164,
 		  ''?'',
 		  20,
 		  ''Reliability'',
@@ -4737,7 +4750,10 @@ AS
 												'HADR_TIMER_TASK',
 												'HADR_WORK_QUEUE',
 												'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP',
-												'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP'))
+												'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',
+												'REDO_THREAD_PENDING_WORK',
+												'UCS_SESSION_REGISTRATION',
+												'BROKER_TRANSMITTER'))
 									BEGIN
 									/* Check for waits that have had more than 10% of the server's wait time */
 									WITH os(wait_type, waiting_tasks_count, wait_time_ms, max_wait_time_ms, signal_wait_time_ms)
@@ -4779,7 +4795,10 @@ AS
 												'HADR_TIMER_TASK',
 												'HADR_WORK_QUEUE',
 												'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP',
-												'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP')
+												'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',
+												'REDO_THREAD_PENDING_WORK',
+												'UCS_SESSION_REGISTRATION',
+												'BROKER_TRANSMITTER')
 												AND wait_time_ms > .1 * @CPUMSsinceStartup
 												AND waiting_tasks_count > 0)
 									INSERT  INTO #BlitzResults
@@ -4819,7 +4838,7 @@ AS
 									END /* IF EXISTS (SELECT * FROM sys.dm_os_wait_stats WHERE wait_time_ms > 0 AND waiting_tasks_count > 0) */
 
 								/* If no waits were found, add a note about that */
-								IF NOT EXISTS (SELECT * FROM #BlitzResults WHERE CheckID = 152)
+								IF NOT EXISTS (SELECT * FROM #BlitzResults WHERE CheckID IN (107, 108, 109, 121, 152, 162))
 								BEGIN
 									INSERT  INTO #BlitzResults
 											( CheckID ,
