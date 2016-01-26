@@ -30,8 +30,8 @@ SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 /*
 sp_AskBrent (TM)
 
-(C) 2015, Brent Ozar Unlimited.
-See http://BrentOzar.com/go/eula for the End User Licensing Agreement.
+(C) 2016, Brent Ozar Unlimited.
+See http://www.BrentOzar.com/go/eula for the End User Licensing Agreement.
 
 Sure, the server needs tuning - but why is it slow RIGHT NOW?
 sp_AskBrent performs quick checks for things like:
@@ -55,6 +55,12 @@ Known limitations of this version:
 Unknown limitations of this version:
  - None. Like Zombo.com, the only limit is yourself.
 
+Changes in v20 - January 1, 2016
+ - Andy McAuley fixed a SQL Server 2005 compatibility bug.
+ - Trevor Hawkins fixed a bug in the view creation for looking at historical
+   table captures.
+ - Bug fixes.
+
 Changes in v19 - October 6, 2015
  - If @OutputTable* parameters are populated, we also create a set of views to
    query the output tables. The views have the same database/schema/name as the
@@ -74,7 +80,7 @@ Changes in v17 - July 19, 2015
 */
 
 
-SELECT @Version = 19, @VersionDate = '20151006'
+SELECT @Version = 20, @VersionDate = '20160101'
 
 DECLARE @StringToExecute NVARCHAR(4000),
 	@ParmDefinitions NVARCHAR(4000),
@@ -528,7 +534,9 @@ BEGIN
 		'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP',
 		'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',
 		'RESOURCE_GOVERNOR_IDLE',
-		'QDS_ASYNC_QUEUE'
+		'QDS_ASYNC_QUEUE',
+		'QDS_SHUTDOWN_QUEUE',
+		'SLEEP_SYSTEMTASK'
 	)
 	ORDER BY sum_wait_time_ms DESC;
 
@@ -572,7 +580,7 @@ BEGIN
 		1 AS Priority,
 		'Maintenance Tasks Running' AS FindingGroup,
 		'Backup Running' AS Finding,
-		'http://BrentOzar.com/askbrent/backups/' AS URL,
+		'http://www.BrentOzar.com/askbrent/backups/' AS URL,
 		'Backup of ' + DB_NAME(db.resource_database_id) + ' database (' + (SELECT CAST(CAST(SUM(size * 8.0 / 1024 / 1024) AS BIGINT) AS NVARCHAR) FROM #MasterFiles WHERE database_id = db.resource_database_id) + 'GB) is ' + CAST(r.percent_complete AS NVARCHAR(100)) + '% complete, has been running since ' + CAST(r.start_time AS NVARCHAR(100)) + '. ' AS Details,
 		'KILL ' + CAST(r.session_id AS NVARCHAR(100)) + ';' AS HowToStopIt,
 		pl.query_plan AS QueryPlan,
@@ -613,7 +621,7 @@ BEGIN
 		1 AS Priority,
 		'Maintenance Tasks Running' AS FindingGroup,
 		'DBCC Running' AS Finding,
-		'http://BrentOzar.com/askbrent/dbcc/' AS URL,
+		'http://www.BrentOzar.com/askbrent/dbcc/' AS URL,
 		'Corruption check of ' + DB_NAME(db.resource_database_id) + ' database (' + (SELECT CAST(CAST(SUM(size * 8.0 / 1024 / 1024) AS BIGINT) AS NVARCHAR) FROM #MasterFiles WHERE database_id = db.resource_database_id) + 'GB) has been running since ' + CAST(r.start_time AS NVARCHAR(100)) + '. ' AS Details,
 		'KILL ' + CAST(r.session_id AS NVARCHAR(100)) + ';' AS HowToStopIt,
 		pl.query_plan AS QueryPlan,
@@ -646,7 +654,7 @@ BEGIN
 		1 AS Priority,
 		'Maintenance Tasks Running' AS FindingGroup,
 		'Restore Running' AS Finding,
-		'http://BrentOzar.com/askbrent/backups/' AS URL,
+		'http://www.BrentOzar.com/askbrent/backups/' AS URL,
 		'Restore of ' + DB_NAME(db.resource_database_id) + ' database (' + (SELECT CAST(CAST(SUM(size * 8.0 / 1024 / 1024) AS BIGINT) AS NVARCHAR) FROM #MasterFiles WHERE database_id = db.resource_database_id) + 'GB) is ' + CAST(r.percent_complete AS NVARCHAR(100)) + '% complete, has been running since ' + CAST(r.start_time AS NVARCHAR(100)) + '. ' AS Details,
 		'KILL ' + CAST(r.session_id AS NVARCHAR(100)) + ';' AS HowToStopIt,
 		pl.query_plan AS QueryPlan,
@@ -679,9 +687,9 @@ BEGIN
 		1 AS Priority,
 		'SQL Server Internal Maintenance' AS FindingGroup,
 		'Database File Growing' AS Finding,
-		'http://BrentOzar.com/go/instant' AS URL,
+		'http://www.BrentOzar.com/go/instant' AS URL,
 		'SQL Server is waiting for Windows to provide storage space for a database restore, a data file growth, or a log file growth. This task has been running since ' + CAST(r.start_time AS NVARCHAR(100)) + '.' + @LineFeed + 'Check the query plan (expert mode) to identify the database involved.' AS Details,
-		'Unfortunately, you can''t stop this, but you can prevent it next time. Check out http://BrentOzar.com/go/instant for details.' AS HowToStopIt,
+		'Unfortunately, you can''t stop this, but you can prevent it next time. Check out http://www.BrentOzar.com/go/instant for details.' AS HowToStopIt,
 		pl.query_plan AS QueryPlan,
 		r.start_time AS StartTime,
 		s.login_name AS LoginName,
@@ -707,7 +715,7 @@ BEGIN
 		1 AS Priority,
 		'Query Problems' AS FindingGroup,
 		'Long-Running Query Blocking Others' AS Finding,
-		'http://BrentOzar.com/go/blocking' AS URL,
+		'http://www.BrentOzar.com/go/blocking' AS URL,
 		'Query in ' + DB_NAME(db.resource_database_id) + ' has been running since ' + CAST(r.start_time AS NVARCHAR(100)) + '. ' + @LineFeed + @LineFeed
 			+ CAST(COALESCE((SELECT TOP 1 [text] FROM sys.dm_exec_sql_text(rBlocker.sql_handle)),
 			(SELECT TOP 1 [text] FROM master..sysprocesses spBlocker CROSS APPLY sys.dm_exec_sql_text(spBlocker.sql_handle) WHERE spBlocker.spid = tBlocked.blocking_session_id), '') AS NVARCHAR(2000)) AS Details,
@@ -747,7 +755,7 @@ BEGIN
 			50 AS Priority,
 			'Query Problems' AS FindingGroup,
 			'Plan Cache Erased Recently' AS Finding,
-			'http://BrentOzar.com/askbrent/plan-cache-erased-recently/' AS URL,
+			'http://www.BrentOzar.com/askbrent/plan-cache-erased-recently/' AS URL,
 			'The oldest query in the plan cache was created at ' + CAST(creation_time AS NVARCHAR(50)) + '. ' + @LineFeed + @LineFeed
 				+ 'This indicates that someone ran DBCC FREEPROCCACHE at that time,' + @LineFeed
 				+ 'Giving SQL Server temporary amnesia. Now, as queries come in,' + @LineFeed
@@ -801,7 +809,7 @@ BEGIN
 		1 AS Priority,
 		'Query Problems' AS FindingGroup,
 		'Query Rolling Back' AS Finding,
-		'http://BrentOzar.com/askbrent/rollback/' AS URL,
+		'http://www.BrentOzar.com/askbrent/rollback/' AS URL,
 		'Rollback started at ' + CAST(r.start_time AS NVARCHAR(100)) + ', is ' + CAST(r.percent_complete AS NVARCHAR(100)) + '% complete.' AS Details,
 		'Unfortunately, you can''t stop this. Whatever you do, don''t restart the server in an attempt to fix it - SQL Server will keep rolling back.' AS HowToStopIt,
 		r.start_time AS StartTime,
@@ -831,7 +839,7 @@ BEGIN
 		50 AS Priority,
 		'Server Performance' AS FindingGroup,
 		'Page Life Expectancy Low' AS Finding,
-		'http://BrentOzar.com/askbrent/page-life-expectancy/' AS URL,
+		'http://www.BrentOzar.com/askbrent/page-life-expectancy/' AS URL,
 		'SQL Server Buffer Manager:Page life expectancy is ' + CAST(c.cntr_value AS NVARCHAR(10)) + ' seconds.' + @LineFeed
 			+ 'This means SQL Server can only keep data pages in memory for that many seconds after reading those pages in from storage.' + @LineFeed
 			+ 'This is a symptom, not a cause - it indicates very read-intensive queries that need an index, or insufficient server memory.' AS Details,
@@ -847,8 +855,8 @@ BEGIN
 		251 AS Priority,
 		'Server Info' AS FindingGroup,
 		'Database Size, Total GB' AS Finding,
-		CAST(CAST(SUM (size)*8./1024./1024. AS BIGINT) AS VARCHAR(100)) AS Details,
-        SUM (size)*8./1024./1024. AS DetailsInt,
+		CAST(SUM (CAST(size AS bigint)*8./1024./1024.) AS VARCHAR(100)) AS Details,
+        SUM (CAST(size AS bigint))*8./1024./1024. AS DetailsInt,
         'http://www.BrentOzar.com/askbrent/' AS URL
 	FROM #MasterFiles
 	WHERE database_id > 4
@@ -873,7 +881,7 @@ BEGIN
            as well get it now - whereas if we're checking 30+ seconds, it might get updated by the
            end of our sp_AskBrent session. */
         INSERT INTO #AskBrentResults (CheckID, Priority, FindingsGroup, Finding, Details, DetailsInt, URL)
-        SELECT 24, 50, 'Server Performance', 'High CPU Utilization', CAST(100 - SystemIdle AS NVARCHAR(20)) + N'%. Ring buffer details: ' + CAST(record AS NVARCHAR(4000)), 100 - SystemIdle, 'http://BrentOzar.com/go/cpu'
+        SELECT 24, 50, 'Server Performance', 'High CPU Utilization', CAST(100 - SystemIdle AS NVARCHAR(20)) + N'%. Ring buffer details: ' + CAST(record AS NVARCHAR(4000)), 100 - SystemIdle, 'http://www.BrentOzar.com/go/cpu'
             FROM (
                 SELECT record,
                     record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') as SystemIdle
@@ -887,7 +895,7 @@ BEGIN
             WHERE 100 - SystemIdle >= 50
 
         INSERT INTO #AskBrentResults (CheckID, Priority, FindingsGroup, Finding, Details, DetailsInt, URL)
-        SELECT 23, 250, 'Server Info', 'CPU Utilization', CAST(100 - SystemIdle AS NVARCHAR(20)) + N'%. Ring buffer details: ' + CAST(record AS NVARCHAR(4000)), 100 - SystemIdle, 'http://BrentOzar.com/go/cpu'
+        SELECT 23, 250, 'Server Info', 'CPU Utilization', CAST(100 - SystemIdle AS NVARCHAR(20)) + N'%. Ring buffer details: ' + CAST(record AS NVARCHAR(4000)), 100 - SystemIdle, 'http://www.BrentOzar.com/go/cpu'
             FROM (
                 SELECT record,
                     record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') as SystemIdle
@@ -955,7 +963,9 @@ BEGIN
 		'QDS_PERSIST_TASK_MAIN_LOOP_SLEEP',
 		'QDS_CLEANUP_STALE_QUERIES_TASK_MAIN_LOOP_SLEEP',
 		'RESOURCE_GOVERNOR_IDLE',
-		'QDS_ASYNC_QUEUE'
+		'QDS_ASYNC_QUEUE',
+		'QDS_SHUTDOWN_QUEUE',
+		'SLEEP_SYSTEMTASK'
 	)
 	ORDER BY sum_wait_time_ms DESC;
 
@@ -1020,7 +1030,7 @@ BEGIN
 		BEGIN
 
 			INSERT INTO #AskBrentResults (CheckID, Priority, FindingsGroup, Finding, URL, Details)
-			VALUES (18, 210, 'Query Stats', 'Plan Cache Analysis Skipped', 'http://BrentOzar.com/go/topqueries',
+			VALUES (18, 210, 'Query Stats', 'Plan Cache Analysis Skipped', 'http://www.BrentOzar.com/go/topqueries',
 				'Due to excessive load, the plan cache analysis was skipped. To override this, use @ExpertMode = 1.')
 
 		END
@@ -1109,7 +1119,7 @@ BEGIN
 
 		/* Query Stats - CheckID 17 - Most Resource-Intensive Queries */
 		INSERT INTO #AskBrentResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, QueryStatsNowID, QueryStatsFirstID, PlanHandle)
-		SELECT 17, 210, 'Query Stats', 'Most Resource-Intensive Queries', 'http://BrentOzar.com/go/topqueries',
+		SELECT 17, 210, 'Query Stats', 'Most Resource-Intensive Queries', 'http://www.BrentOzar.com/go/topqueries',
 			'Query stats during the sample:' + @LineFeed +
 			'Executions: ' + CAST(qsNow.execution_count - (COALESCE(qsFirst.execution_count, 0)) AS NVARCHAR(100)) + @LineFeed +
 			'Elapsed Time: ' + CAST(qsNow.total_elapsed_time - (COALESCE(qsFirst.total_elapsed_time, 0)) AS NVARCHAR(100)) + @LineFeed +
@@ -1184,7 +1194,7 @@ BEGIN
 		50 AS Priority,
 		'Server Performance' AS FindingGroup,
 		'Slow Data File Reads' AS Finding,
-		'http://BrentOzar.com/go/slow/' AS URL,
+		'http://www.BrentOzar.com/go/slow/' AS URL,
 		'File: ' + fNow.PhysicalName + @LineFeed
 			+ 'Number of reads during the sample: ' + CAST((fNow.num_of_reads - fBase.num_of_reads) AS NVARCHAR(20)) + @LineFeed
 			+ 'Seconds spent waiting on storage for these reads: ' + CAST(((fNow.io_stall_read_ms - fBase.io_stall_read_ms) / 1000.0) AS NVARCHAR(20)) + @LineFeed
@@ -1205,7 +1215,7 @@ BEGIN
 		50 AS Priority,
 		'Server Performance' AS FindingGroup,
 		'Slow Log File Writes' AS Finding,
-		'http://BrentOzar.com/go/slow/' AS URL,
+		'http://www.BrentOzar.com/go/slow/' AS URL,
 		'File: ' + fNow.PhysicalName + @LineFeed
 			+ 'Number of writes during the sample: ' + CAST((fNow.num_of_writes - fBase.num_of_writes) AS NVARCHAR(20)) + @LineFeed
 			+ 'Seconds spent waiting on storage for these writes: ' + CAST(((fNow.io_stall_write_ms - fBase.io_stall_write_ms) / 1000.0) AS NVARCHAR(20)) + @LineFeed
@@ -1227,7 +1237,7 @@ BEGIN
 		1 AS Priority,
 		'SQL Server Internal Maintenance' AS FindingGroup,
 		'Log File Growing' AS Finding,
-		'http://BrentOzar.com/askbrent/file-growing/' AS URL,
+		'http://www.BrentOzar.com/askbrent/file-growing/' AS URL,
 		'Number of growths during the sample: ' + CAST(ps.value_delta AS NVARCHAR(20)) + @LineFeed
 			+ 'Determined by sampling Perfmon counter ' + ps.object_name + ' - ' + ps.counter_name + @LineFeed AS Details,
 		'Pre-grow data and log files during maintenance windows so that they do not grow during production loads. See the URL for more details.'  AS HowToStopIt
@@ -1244,7 +1254,7 @@ BEGIN
 		1 AS Priority,
 		'SQL Server Internal Maintenance' AS FindingGroup,
 		'Log File Shrinking' AS Finding,
-		'http://BrentOzar.com/askbrent/file-shrinking/' AS URL,
+		'http://www.BrentOzar.com/askbrent/file-shrinking/' AS URL,
 		'Number of shrinks during the sample: ' + CAST(ps.value_delta AS NVARCHAR(20)) + @LineFeed
 			+ 'Determined by sampling Perfmon counter ' + ps.object_name + ' - ' + ps.counter_name + @LineFeed AS Details,
 		'Pre-grow data and log files during maintenance windows so that they do not grow during production loads. See the URL for more details.' AS HowToStopIt
@@ -1260,7 +1270,7 @@ BEGIN
 		50 AS Priority,
 		'Query Problems' AS FindingGroup,
 		'Compilations/Sec High' AS Finding,
-		'http://BrentOzar.com/askbrent/compilations/' AS URL,
+		'http://www.BrentOzar.com/askbrent/compilations/' AS URL,
 		'Number of batch requests during the sample: ' + CAST(ps.value_delta AS NVARCHAR(20)) + @LineFeed
 			+ 'Number of compilations during the sample: ' + CAST(psComp.value_delta AS NVARCHAR(20)) + @LineFeed
 			+ 'For OLTP environments, Microsoft recommends that 90% of batch requests should hit the plan cache, and not be compiled from scratch. We are exceeding that threshold.' + @LineFeed AS Details,
@@ -1279,7 +1289,7 @@ BEGIN
 		50 AS Priority,
 		'Query Problems' AS FindingGroup,
 		'Re-Compilations/Sec High' AS Finding,
-		'http://BrentOzar.com/askbrent/recompilations/' AS URL,
+		'http://www.BrentOzar.com/askbrent/recompilations/' AS URL,
 		'Number of batch requests during the sample: ' + CAST(ps.value_delta AS NVARCHAR(20)) + @LineFeed
 			+ 'Number of recompilations during the sample: ' + CAST(psComp.value_delta AS NVARCHAR(20)) + @LineFeed
 			+ 'More than 10% of our queries are being recompiled. This is typically due to statistics changing on objects.' + @LineFeed AS Details,
@@ -1298,7 +1308,7 @@ BEGIN
 		250 AS Priority,
 		'Server Info' AS FindingGroup,
 		'Batch Requests per Sec' AS Finding,
-		'http://BrentOzar.com/go/measure' AS URL,
+		'http://www.BrentOzar.com/go/measure' AS URL,
 		CAST(ps.value_delta / (DATEDIFF(ss, ps1.SampleTime, ps.SampleTime)) AS NVARCHAR(20)) AS Details,
         ps.value_delta / (DATEDIFF(ss, ps1.SampleTime, ps.SampleTime)) AS DetailsInt
 	FROM #PerfmonStats ps
@@ -1318,7 +1328,7 @@ BEGIN
 		250 AS Priority,
 		'Server Info' AS FindingGroup,
 		'SQL Compilations per Sec' AS Finding,
-		'http://BrentOzar.com/go/measure' AS URL,
+		'http://www.BrentOzar.com/go/measure' AS URL,
 		CAST(ps.value_delta / (DATEDIFF(ss, ps1.SampleTime, ps.SampleTime)) AS NVARCHAR(20)) AS Details,
         ps.value_delta / (DATEDIFF(ss, ps1.SampleTime, ps.SampleTime)) AS DetailsInt
 	FROM #PerfmonStats ps
@@ -1334,7 +1344,7 @@ BEGIN
 		250 AS Priority,
 		'Server Info' AS FindingGroup,
 		'SQL Re-Compilations per Sec' AS Finding,
-		'http://BrentOzar.com/go/measure' AS URL,
+		'http://www.BrentOzar.com/go/measure' AS URL,
 		CAST(ps.value_delta / (DATEDIFF(ss, ps1.SampleTime, ps.SampleTime)) AS NVARCHAR(20)) AS Details,
         ps.value_delta / (DATEDIFF(ss, ps1.SampleTime, ps.SampleTime)) AS DetailsInt
 	FROM #PerfmonStats ps
@@ -1345,6 +1355,7 @@ BEGIN
 
 	/* Server Info - Wait Time per Core per Sec - CheckID 20 */
 	IF @Seconds > 0
+	BEGIN
 		WITH waits1(SampleTime, waits_ms) AS (SELECT SampleTime, SUM(ws1.wait_time_ms) FROM #WaitStats ws1 WHERE ws1.Pass = 1 GROUP BY SampleTime),
 		waits2(SampleTime, waits_ms) AS (SELECT SampleTime, SUM(ws2.wait_time_ms) FROM #WaitStats ws2 WHERE ws2.Pass = 2 GROUP BY SampleTime),
 		cores(cpu_count) AS (SELECT SUM(1) FROM sys.dm_os_schedulers WHERE status = 'VISIBLE ONLINE' AND is_online = 1)
@@ -1353,12 +1364,13 @@ BEGIN
 			250 AS Priority,
 			'Server Info' AS FindingGroup,
 			'Wait Time per Core per Sec' AS Finding,
-			'http://BrentOzar.com/go/measure' AS URL,
+			'http://www.BrentOzar.com/go/measure' AS URL,
 			CAST((waits2.waits_ms - waits1.waits_ms) / 1000 / i.cpu_count / DATEDIFF(ss, waits1.SampleTime, waits2.SampleTime) AS NVARCHAR(20)) AS Details,
 			(waits2.waits_ms - waits1.waits_ms) / 1000 / i.cpu_count / DATEDIFF(ss, waits1.SampleTime, waits2.SampleTime) AS DetailsInt
 		FROM cores i
 		  CROSS JOIN waits1
 		  CROSS JOIN waits2;
+    END
 
     /* Server Performance - High CPU Utilization CheckID 24 */
     IF @Seconds >= 30
@@ -1368,7 +1380,7 @@ BEGIN
            as well get it now - whereas if we're checking 30+ seconds, it might get updated by the
            end of our sp_AskBrent session. */
         INSERT INTO #AskBrentResults (CheckID, Priority, FindingsGroup, Finding, Details, DetailsInt, URL)
-        SELECT 24, 50, 'Server Performance', 'High CPU Utilization', CAST(100 - SystemIdle AS NVARCHAR(20)) + N'%. Ring buffer details: ' + CAST(record AS NVARCHAR(4000)), 100 - SystemIdle, 'http://BrentOzar.com/go/cpu'
+        SELECT 24, 50, 'Server Performance', 'High CPU Utilization', CAST(100 - SystemIdle AS NVARCHAR(20)) + N'%. Ring buffer details: ' + CAST(record AS NVARCHAR(4000)), 100 - SystemIdle, 'http://www.BrentOzar.com/go/cpu'
             FROM (
                 SELECT record,
                     record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') as SystemIdle
@@ -1382,7 +1394,7 @@ BEGIN
             WHERE 100 - SystemIdle >= 50
 
         INSERT INTO #AskBrentResults (CheckID, Priority, FindingsGroup, Finding, Details, DetailsInt, URL)
-        SELECT 23, 250, 'Server Info', 'CPU Utilization', CAST(100 - SystemIdle AS NVARCHAR(20)) + N'%. Ring buffer details: ' + CAST(record AS NVARCHAR(4000)), 100 - SystemIdle, 'http://BrentOzar.com/go/cpu'
+        SELECT 23, 250, 'Server Info', 'CPU Utilization', CAST(100 - SystemIdle AS NVARCHAR(20)) + N'%. Ring buffer details: ' + CAST(record AS NVARCHAR(4000)), 100 - SystemIdle, 'http://www.BrentOzar.com/go/cpu'
             FROM (
                 SELECT record,
                     record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') as SystemIdle
@@ -1452,6 +1464,26 @@ BEGIN
 				  'http://www.BrentOzar.com/askbrent/' ,
 				  'Thanks from the Brent Ozar Unlimited team.  We hope you found this tool useful, and if you need help relieving your SQL Server pains, email us at Help@BrentOzar.com.'
 				);
+
+                /* Outdated sp_Blitz - sp_Blitz is Over 6 Months Old */
+                IF DATEDIFF(MM, @VersionDate, GETDATE()) > 6
+                    BEGIN
+                        INSERT  INTO #AskBrentResults
+		                        ( CheckID ,
+			                        Priority ,
+			                        FindingsGroup ,
+			                        Finding ,
+			                        URL ,
+			                        Details
+		                        )
+		                        SELECT 27 AS CheckID ,
+				                        0 AS Priority ,
+				                        'Outdated sp_AskBrent' AS FindingsGroup ,
+				                        'sp_AskBrent is Over 6 Months Old' AS Finding ,
+				                        'http://www.BrentOzar.com/askbrent/' AS URL ,
+				                        'Some things get better with age, like fine wine and your T-SQL. However, sp_AskBrent is not one of those things - time to go download the current one.' AS Details
+                    END
+
 
 
 	/* @OutputTableName lets us export the results to a permanent table */
@@ -1620,9 +1652,9 @@ BEGIN
 				+ ', io_stall_write_ms_average = CASE WHEN (f.num_of_writes - fPrior.num_of_writes) = 0 THEN 0 ELSE (f.io_stall_write_ms - fPrior.io_stall_write_ms) / (f.num_of_writes - fPrior.num_of_writes) END' + @LineFeed
 				+ ', (f.num_of_writes - fPrior.num_of_writes) AS num_of_writes' + @LineFeed
 				+ ', (f.bytes_written - fPrior.bytes_written) / 1024.0 / 1024.0 AS megabytes_written' + @LineFeed
-				+ 'FROM dbo.AskBrentResults_FileStats f' + @LineFeed
-				+ 'INNER JOIN dbo.AskBrentResults_FileStats fPrior ON f.ServerName = fPrior.ServerName AND f.DatabaseID = fPrior.DatabaseID AND f.FileID = fPrior.FileID AND f.CheckDate > fPrior.CheckDate' + @LineFeed
-				+ 'LEFT OUTER JOIN dbo.AskBrentResults_FileStats fMiddle ON f.ServerName = fMiddle.ServerName AND f.DatabaseID = fMiddle.DatabaseID AND f.FileID = fMiddle.FileID AND f.CheckDate > fMiddle.CheckDate AND fMiddle.CheckDate > fPrior.CheckDate' + @LineFeed
+				+ 'FROM ' + @OutputSchemaName + '.' + @OutputTableNameFileStats + ' f' + @LineFeed
+				+ 'INNER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameFileStats + ' fPrior ON f.ServerName = fPrior.ServerName AND f.DatabaseID = fPrior.DatabaseID AND f.FileID = fPrior.FileID AND f.CheckDate > fPrior.CheckDate' + @LineFeed
+				+ 'LEFT OUTER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameFileStats + ' fMiddle ON f.ServerName = fMiddle.ServerName AND f.DatabaseID = fMiddle.DatabaseID AND f.FileID = fMiddle.FileID AND f.CheckDate > fMiddle.CheckDate AND fMiddle.CheckDate > fPrior.CheckDate' + @LineFeed
 				+ 'WHERE fMiddle.ID IS NULL;'')'
 			EXEC(@StringToExecute);
 			END
@@ -1728,9 +1760,9 @@ BEGIN
 				+ ', p.cntr_value' + @LineFeed
 				+ ', p.cntr_type' + @LineFeed
 				+ ', (p.cntr_value - pPrior.cntr_value) AS cntr_delta' + @LineFeed
-				+ 'FROM dbo.AskBrentResults_PerfmonStats p' + @LineFeed
-				+ 'INNER JOIN dbo.AskBrentResults_PerfmonStats pPrior ON p.ServerName = pPrior.ServerName AND p.object_name = pPrior.object_name AND p.counter_name = pPrior.counter_name AND p.instance_name = pPrior.instance_name AND p.CheckDate > pPrior.CheckDate' + @LineFeed
-				+ 'LEFT OUTER JOIN dbo.AskBrentResults_PerfmonStats pMiddle ON p.ServerName = pMiddle.ServerName AND p.object_name = pMiddle.object_name AND p.counter_name = pMiddle.counter_name AND p.instance_name = pMiddle.instance_name AND p.CheckDate > pMiddle.CheckDate AND pMiddle.CheckDate > pPrior.CheckDate' + @LineFeed
+				+ 'FROM ' + @OutputSchemaName + '.' + @OutputTableNamePerfmonStats + ' p' + @LineFeed
+				+ 'INNER JOIN ' + @OutputSchemaName + '.' + @OutputTableNamePerfmonStats + ' pPrior ON p.ServerName = pPrior.ServerName AND p.object_name = pPrior.object_name AND p.counter_name = pPrior.counter_name AND p.instance_name = pPrior.instance_name AND p.CheckDate > pPrior.CheckDate' + @LineFeed
+				+ 'LEFT OUTER JOIN ' + @OutputSchemaName + '.' + @OutputTableNamePerfmonStats + ' pMiddle ON p.ServerName = pMiddle.ServerName AND p.object_name = pMiddle.object_name AND p.counter_name = pMiddle.counter_name AND p.instance_name = pMiddle.instance_name AND p.CheckDate > pMiddle.CheckDate AND pMiddle.CheckDate > pPrior.CheckDate' + @LineFeed
 				+ 'WHERE pMiddle.ID IS NULL;'')'
 			EXEC(@StringToExecute);
 			END;
@@ -1827,9 +1859,9 @@ BEGIN
 				+ ', (w.wait_time_ms - wPrior.wait_time_ms) AS wait_time_ms_delta' + @LineFeed
 				+ ', (w.signal_wait_time_ms - wPrior.signal_wait_time_ms) AS signal_wait_time_ms_delta' + @LineFeed
 				+ ', (w.waiting_tasks_count - wPrior.waiting_tasks_count) AS waiting_tasks_count_delta' + @LineFeed
-				+ 'FROM dbo.AskBrentResults_WaitStats w' + @LineFeed
-				+ 'INNER JOIN dbo.AskBrentResults_WaitStats wPrior ON w.ServerName = wPrior.ServerName AND w.wait_type = wPrior.wait_type AND w.CheckDate > wPrior.CheckDate' + @LineFeed
-				+ 'LEFT OUTER JOIN dbo.AskBrentResults_WaitStats wMiddle ON w.ServerName = wMiddle.ServerName AND w.wait_type = wMiddle.wait_type AND w.CheckDate > wMiddle.CheckDate AND wMiddle.CheckDate > wPrior.CheckDate' + @LineFeed
+				+ 'FROM ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats + ' w' + @LineFeed
+				+ 'INNER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats + ' wPrior ON w.ServerName = wPrior.ServerName AND w.wait_type = wPrior.wait_type AND w.CheckDate > wPrior.CheckDate' + @LineFeed
+				+ 'LEFT OUTER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats + ' wMiddle ON w.ServerName = wMiddle.ServerName AND w.wait_type = wMiddle.wait_type AND w.CheckDate > wMiddle.CheckDate AND wMiddle.CheckDate > wPrior.CheckDate' + @LineFeed
 				+ 'WHERE wMiddle.ID IS NULL;'')'
 			EXEC(@StringToExecute);
 			END
@@ -2088,7 +2120,7 @@ BEGIN
 				CASE WHEN (wd2.waiting_tasks_count - wd1.waiting_tasks_count) > 0
 				THEN
 					cast((wd2.wait_time_ms-wd1.wait_time_ms)/
-						(1.0*(wd2.waiting_tasks_count - wd1.waiting_tasks_count)) as numeric(10,1))
+						(1.0*(wd2.waiting_tasks_count - wd1.waiting_tasks_count)) as numeric(12,1))
 				ELSE 0 END AS [Avg ms Per Wait]
 			FROM  max_batch b
 			JOIN #WaitStats wd2 on
@@ -2097,8 +2129,8 @@ BEGIN
 				wd1.wait_type=wd2.wait_type AND
 				wd2.SampleTime > wd1.SampleTime
 			CROSS APPLY (SELECT
-				cast((wd2.wait_time_ms-wd1.wait_time_ms)/1000. as numeric(10,1)) as [Wait Time (Seconds)],
-				cast((wd2.signal_wait_time_ms - wd1.signal_wait_time_ms)/1000. as numeric(10,1)) as [Signal Wait Time (Seconds)]) AS c
+				cast((wd2.wait_time_ms-wd1.wait_time_ms)/1000. as numeric(12,1)) as [Wait Time (Seconds)],
+				cast((wd2.signal_wait_time_ms - wd1.signal_wait_time_ms)/1000. as numeric(12,1)) as [Signal Wait Time (Seconds)]) AS c
 			WHERE (wd2.waiting_tasks_count - wd1.waiting_tasks_count) > 0
 				and wd2.wait_time_ms-wd1.wait_time_ms > 0
 			ORDER BY [Wait Time (Seconds)] DESC;

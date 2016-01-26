@@ -1,6 +1,6 @@
 # The Free SQL Server Download Pack from Brent Ozar Unlimited
 
-(C) 2015, Brent Ozar Unlimited.
+(C) 2016, Brent Ozar Unlimited.
 
 To get the latest version and read the End User Licensing Agreement, visit:
 http://BrentOzar.com/go/download
