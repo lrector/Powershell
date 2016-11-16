@@ -2,8 +2,8 @@
 
 (C) 2016, Brent Ozar Unlimited.
 
-To get the latest version and read the End User Licensing Agreement, visit:
-http://BrentOzar.com/go/download
+To get the latest version, visit:
+https://www.BrentOzar.com/first-aid/
 
 
 
@@ -18,24 +18,21 @@ and more reliable.
 
 The posters and books are pretty self-explanatory. The scripts are:
 
-sp_BlitzFirst - "Why is my SQL Server slow right now?" Instructions: http://www.BrentOzar.com/askbrent/
+sp_Blitz - "Somebody just handed me a SQL Server. Is it in good shape?" Instructions: https://www.BrentOzar.com/blitz/
 
-sp_Blitz - "Somebody just handed me a SQL Server. Is it in good shape?" Instructions: http://www.BrentOzar.com/blitz/
+sp_BlitzFirst - "Why is my SQL Server slow right now?" Instructions: https://www.BrentOzar.com/askbrent/
 
-sp_BlitzCache - "What are the most resource-intensive queries on this server?" Instructions: http://www.BrentOzar.com/blitzcache/
+sp_BlitzCache - "What are the most resource-intensive queries on this server?" Instructions: https://www.BrentOzar.com/blitzcache/
 
-sp_BlitzIndex - "How could I tune indexes to make this database faster?" Instructions: http://www.BrentOzar.com/blitzindex/
-
-sp_BlitzRS - "Is my SQL Server Reporting Services server healthy?" Instructions: http://www.BrentOzar.com/blitzrs/
-
+sp_BlitzIndex - "How could I tune indexes to make this database faster?" Instructions: https://www.BrentOzar.com/blitzindex/
 
 
 
 ## Got Questions About This Stuff?
 
-To report a bug or suggest an enhancement: http://support.brentozar.com
+To report a bug or suggest an enhancement: http://FirstResponderKit.org
 
-For questions and thank-yous: help@brentozar.com or http://www.brentozar.com/contact
+For questions and thank-yous: help@brentozar.com or https://www.brentozar.com/contact
 
 For a good time: http://DBAreactions.com
 
