@@ -1,6 +1,20 @@
 
+declare @agencyid int 
+
+select	'http://beehiveuser.blob.core.windows.net/attachments/'+c.Value+'/files/'+convert(varchar,isnull(@agencyid,fc.primaryagencyid))+'/'+a.FilePath
+from	Attachments  a
+join	FeatureAttachments fa on fa.attachmentid = a.id
+join	features f on f.id = fa.featureid
+join	featureclasses fc on fc.id = f.featureclassid
+join	ConfigurationSettings c on c.[Key] = 'CustomerId'
+where	fc.primaryagencyid = isnull(@AgencyId,fc.primaryagencyid)
+and		f.isdeleted = 0
+and		fa.isdeleted = 0
+and		a.isdeleted = 0
+and		nullif(a.filepath,'') is not null
 
 
+/*
 select	'http://beehiveuser.blob.core.windows.net/attachments/1066/files/13/' +filepath
 from	Attachments a
 join	FeatureAttachments fa on fa.attachmentid = a.id
@@ -352,3 +366,4 @@ where	filepath in (
 ,'f8f52f5e-e2f5-4025-8917-1916f485c07f.jpg'
 ,'39c04b70-e545-4902-86b3-dbc99bdb96cd.jpg'
 ,'94030c49-b667-458a-b252-d7b3d6f977e7.jpg')
+*/
