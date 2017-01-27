@@ -29,7 +29,7 @@ ALTER PROCEDURE [dbo].[sp_Blitz]
 AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-	SET @VersionDate = '20161115';
+	SET @VersionDate = '20170201';
 	SET @OutputType = UPPER(@OutputType);
 
 	IF @Help = 1 PRINT '
@@ -72,9 +72,17 @@ AS
 	@IgnorePrioritiesAbove		50=ignore priorities above 50
 	For the rest of the parameters, see http://www.brentozar.com/blitz/documentation for details.
 
-    MIT License
 
-	Copyright (c) 2016 Brent Ozar Unlimited
+
+    MIT License
+	
+	Copyright for portions of sp_Blitz are held by Microsoft as part of project 
+	tigertoolbox and are provided under the MIT license:
+	https://github.com/Microsoft/tigertoolbox
+	   
+	All other copyright for sp_Blitz are held by Brent Ozar Unlimited, 2017.
+
+	Copyright (c) 2017 Brent Ozar Unlimited
 
 	Permission is hereby granted, free of charge, to any person obtaining a copy
 	of this software and associated documentation files (the "Software"), to deal
@@ -95,6 +103,8 @@ AS
 	SOFTWARE.
 
 
+
+
 	*/'
 	ELSE IF @OutputType = 'SCHEMA'
 	BEGIN
@@ -104,17 +114,6 @@ AS
 	ELSE /* IF @OutputType = 'SCHEMA' */
 	BEGIN
 
-		/*
-		We start by creating #BlitzResults. It's a temp table that will store all of
-		the results from our checks. Throughout the rest of this stored procedure,
-		we're running a series of checks looking for dangerous things inside the SQL
-		Server. When we find a problem, we insert rows into #BlitzResults. At the
-		end, we return these results to the end user.
-
-		#BlitzResults has a CheckID field, but there's no Check table. As we do
-		checks, we insert data into this table, and we manually put in the CheckID.
-		For a list of checks, visit http://FirstResponderKit.org.
-		*/
 		DECLARE @StringToExecute NVARCHAR(4000)
 			,@curr_tracefilename NVARCHAR(500)
 			,@base_tracefilename NVARCHAR(500)
@@ -138,12 +137,29 @@ AS
 			,@ResultText NVARCHAR(MAX)
 			,@crlf NVARCHAR(2)
 			,@Processors int
-			,@NUMANodes int;
+			,@NUMANodes int
+			,@MinServerMemory bigint
+			,@MaxServerMemory bigint
+			,@ColumnStoreIndexesInUse bit;
 
 
 		SET @crlf = NCHAR(13) + NCHAR(10);
 		SET @ResultText = 'sp_Blitz Results: ' + @crlf;
 		
+		/*
+		--TOURSTOP01--
+		See https://www.BrentOzar.com/go/blitztour for a guided tour.
+
+		We start by creating #BlitzResults. It's a temp table that will store all of
+		the results from our checks. Throughout the rest of this stored procedure,
+		we're running a series of checks looking for dangerous things inside the SQL
+		Server. When we find a problem, we insert rows into #BlitzResults. At the
+		end, we return these results to the end user.
+
+		#BlitzResults has a CheckID field, but there's no Check table. As we do
+		checks, we insert data into this table, and we manually put in the CheckID.
+		For a list of checks, visit http://FirstResponderKit.org.
+		*/
 		IF OBJECT_ID('tempdb..#BlitzResults') IS NOT NULL
 			DROP TABLE #BlitzResults;
 		CREATE TABLE #BlitzResults
@@ -158,6 +174,14 @@ AS
 			  Details NVARCHAR(4000) ,
 			  QueryPlan [XML] NULL ,
 			  QueryPlanFiltered [NVARCHAR](MAX) NULL
+			);
+
+		IF OBJECT_ID('tempdb..#TemporaryDatabaseResults') IS NOT NULL
+			DROP TABLE #TemporaryDatabaseResults;
+		CREATE TABLE #TemporaryDatabaseResults
+			(
+			  DatabaseName NVARCHAR(128) ,
+			  Finding NVARCHAR(128)
 			);
 
 		/*
@@ -176,6 +200,7 @@ AS
 		not used. YET. We added that parameter in so that we could avoid changing the
 		stored proc's surface area (interface) later.
 		*/
+		/* --TOURSTOP07-- */
 		IF OBJECT_ID('tempdb..#SkipChecks') IS NOT NULL
 			DROP TABLE #SkipChecks;
 		CREATE TABLE #SkipChecks
@@ -220,7 +245,8 @@ AS
 		END
 
 
-			/* If the server is Amazon RDS, skip checks that it doesn't allow */
+		/* --TOURSTOP08-- */
+		/* If the server is Amazon RDS, skip checks that it doesn't allow */
 		IF LEFT(CAST(SERVERPROPERTY('ComputerNamePhysicalNetBIOS') AS VARCHAR(8000)), 8) = 'EC2AMAZ-'
 		   AND LEFT(CAST(SERVERPROPERTY('MachineName') AS VARCHAR(8000)), 8) = 'EC2AMAZ-'
 		   AND LEFT(CAST(SERVERPROPERTY('ServerName') AS VARCHAR(8000)), 8) = 'EC2AMAZ-'
@@ -285,6 +311,11 @@ AS
 		        URL VARCHAR(200),
 		        Details NVARCHAR(4000)
 			);
+
+		IF OBJECT_ID('tempdb..#DatabaseScopedConfigurationDefaults') IS NOT NULL
+			DROP TABLE #DatabaseScopedConfigurationDefaults;
+		CREATE TABLE #DatabaseScopedConfigurationDefaults
+			(ID INT IDENTITY(1,1), configuration_id INT, [name] NVARCHAR(60), default_value sql_variant, default_value_for_secondary sql_variant, CheckID INT, );
 
 
 
@@ -528,8 +559,7 @@ AS
 		SET @ProductVersion = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128));
 		SELECT @ProductVersionMajor = SUBSTRING(@ProductVersion, 1,CHARINDEX('.', @ProductVersion) + 1 ),
 			@ProductVersionMinor = PARSENAME(CONVERT(varchar(32), @ProductVersion), 2)
-
-
+		
 		/*
 		Whew! we're finally done with the setup, and we can start doing checks.
 		First, let's make sure we're actually supposed to do checks on this server.
@@ -951,10 +981,12 @@ AS
 					END
 
 
+				/* --TOURSTOP06-- */
 				IF NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 7 )
 					BEGIN
+						/* --TOURSTOP02-- */
 						INSERT  INTO #BlitzResults
 								( CheckID ,
 								  Priority ,
@@ -1269,6 +1301,7 @@ AS
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 21 )
 					BEGIN
+						/* --TOURSTOP04-- */
 						IF @@VERSION NOT LIKE '%Microsoft SQL Server 2000%'
 							AND @@VERSION NOT LIKE '%Microsoft SQL Server 2005%'
 							BEGIN
@@ -1503,6 +1536,34 @@ AS
 
 				IF NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
+								WHERE   DatabaseName IS NULL AND CheckID = 190 )
+					BEGIN
+						SELECT @MinServerMemory = CAST(value_in_use as BIGINT) FROM sys.configurations WHERE name = 'min server memory (MB)'
+						SELECT @MaxServerMemory = CAST(value_in_use as BIGINT) FROM sys.configurations WHERE name = 'max server memory (MB)'
+						
+						IF (@MinServerMemory = @MaxServerMemory)
+						BEGIN
+						INSERT INTO #BlitzResults
+								( CheckID ,
+								  Priority ,
+								  FindingsGroup ,
+								  Finding ,
+								  URL ,
+								  Details
+								)
+								VALUES  
+									(	190,
+										200,
+										'Performance',
+										'Non-Dynamic Memory',
+										'http://BrentOzar.com/go/memory',
+										'Minimum Server Memory setting is the same as the Maximum (both set to ' + CAST(@MinServerMemory AS NVARCHAR(50)) + '). This will not allow dynamic memory. Please revise memory settings'
+									)
+						END
+					END
+					
+					IF NOT EXISTS ( SELECT  1
+								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 188 )
 					BEGIN
 
@@ -1581,7 +1642,7 @@ AS
 								SELECT TOP 1
 										25 AS CheckID ,
 										'tempdb' ,
-										170 AS Priority ,
+										20 AS Priority ,
 										'File Configuration' AS FindingsGroup ,
 										'TempDB on C Drive' AS Finding ,
 										'http://BrentOzar.com/go/cdrive' AS URL ,
@@ -2881,7 +2942,20 @@ AS
 								END;
 
 							END;
+						
+						/* Check if SQL 2016 Standard Edition but not SP1 */
+						IF NOT EXISTS ( SELECT  1
+										FROM    #SkipChecks
+										WHERE   DatabaseName IS NULL AND CheckID = 189 )
+							BEGIN
+							IF (@ProductVersionMajor = 13 AND @ProductVersionMinor < 4001 AND @@VERSION LIKE '%Standard Edition%') 
+								BEGIN
+								INSERT INTO #BlitzResults(CheckID, Priority, FindingsGroup, Finding, URL, Details)
+									VALUES(189, 100, 'Features', 'Missing Features', 'https://blogs.msdn.microsoft.com/sqlreleaseservices/sql-server-2016-service-pack-1-sp1-released/',
+										'SQL 2016 Standard Edition is being used but not Service Pack 1. Check the URL for a list of Enterprise Features that are included in Standard Edition as of SP1.');
+								END;
 
+							END;						
 
                         /* Performance - High Memory Use for In-Memory OLTP (Hekaton) */
                         IF NOT EXISTS ( SELECT  1
@@ -3240,12 +3314,12 @@ AS
 						WHILE @@FETCH_STATUS = 0
 						BEGIN 
 
-							/* DW* databases ship with Target Recovery Time (142) set to a non-default number */
+							/* Target Recovery Time (142) can be either 0 or 60 due to a number of bugs */
 						    IF @CurrentCheckID = 142
 								SET @StringToExecute = 'INSERT INTO #BlitzResults (CheckID, DatabaseName, Priority, FindingsGroup, Finding, URL, Details)
 								   SELECT ' + CAST(@CurrentCheckID AS NVARCHAR(200)) + ', d.[name], ' + CAST(@CurrentPriority AS NVARCHAR(200)) + ', ''Non-Default Database Config'', ''' + @CurrentFinding + ''',''' + @CurrentURL + ''',''' + COALESCE(@CurrentDetails, 'This database setting is not the default.') + '''
 									FROM sys.databases d
-									WHERE d.database_id > 4 AND d.[name] NOT IN (''DWConfiguration'', ''DWDiagnostics'', ''DWQueue'') AND (d.[' + @CurrentName + '] <> ' + @CurrentDefaultValue + ' OR d.[' + @CurrentName + '] IS NULL);';
+									WHERE d.database_id > 4 AND (d.[' + @CurrentName + '] NOT IN (0, 60) OR d.[' + @CurrentName + '] IS NULL);';
 							ELSE
 								SET @StringToExecute = 'INSERT INTO #BlitzResults (CheckID, DatabaseName, Priority, FindingsGroup, Finding, URL, Details)
 								   SELECT ' + CAST(@CurrentCheckID AS NVARCHAR(200)) + ', d.[name], ' + CAST(@CurrentPriority AS NVARCHAR(200)) + ', ''Non-Default Database Config'', ''' + @CurrentFinding + ''',''' + @CurrentURL + ''',''' + COALESCE(@CurrentDetails, 'This database setting is not the default.') + '''
@@ -3261,7 +3335,7 @@ AS
 							
 
 /*This checks to see if Agent is Offline*/
-IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50 
+IF @ProductVersionMajor >= 10
 			   AND NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 167 )
@@ -3296,7 +3370,7 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 				END;
 
 /*This checks to see if the Full Text thingy is offline*/
-IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50 
+IF @ProductVersionMajor >= 10
 			   AND NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 168 )
@@ -3330,7 +3404,7 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 					END; 
 
 /*This checks which service account SQL Server is running as.*/
-IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50 
+IF @ProductVersionMajor >= 10 
 			   AND NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 169 )
@@ -3366,7 +3440,7 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 					END;
 
 /*This checks which service account SQL Agent is running as.*/
-IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50 
+IF @ProductVersionMajor >= 10
 			   AND NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 170 )
@@ -3401,7 +3475,7 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 					END;
 
 /*This counts memory dumps and gives min and max date of in view*/
-IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50 
+IF @ProductVersionMajor >= 10
 			   AND NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 171 )
@@ -3731,6 +3805,74 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 		                        EXECUTE(@StringToExecute);
 					END
 
+		/* Reliability - TempDB File Error */
+		IF NOT EXISTS ( SELECT  1
+										FROM    #SkipChecks
+										WHERE   DatabaseName IS NULL AND CheckID = 191 )
+			AND (SELECT COUNT(*) FROM sys.master_files WHERE database_id = 2) <> (SELECT COUNT(*) FROM tempdb.sys.database_files)
+				BEGIN
+					INSERT    INTO [#BlitzResults]
+							( [CheckID] ,
+								[Priority] ,
+								[FindingsGroup] ,
+								[Finding] ,
+								[URL] ,
+								[Details] )						
+						
+						SELECT
+						191 AS [CheckID] ,
+						50 AS [Priority] ,
+						'Reliability' AS [FindingsGroup] ,
+						'TempDB File Error' AS [Finding] ,
+						'http://BrentOzar.com/go/tempdboops' AS [URL] , 
+						'Mismatch between the number of TempDB files in sys.master_files versus tempdb.sys.database_files' AS [Details]
+				END
+
+/*Perf - Odd number of cores in a socket*/
+		IF NOT EXISTS ( SELECT  1
+		                FROM    #SkipChecks
+		                WHERE   DatabaseName IS NULL
+		                        AND CheckID = 198 )
+		   AND EXISTS ( SELECT  1
+		                FROM    sys.dm_os_schedulers
+		                WHERE   is_online = 1
+		                        AND scheduler_id < 255
+		                        AND parent_node_id < 64
+		                GROUP BY parent_node_id,
+		                        is_online
+		                HAVING  ( COUNT(cpu_id) + 2 ) % 2 = 1 )
+		   BEGIN
+		
+		         INSERT INTO #BlitzResults
+		                (
+		                  CheckID,
+		                  DatabaseName,
+		                  Priority,
+		                  FindingsGroup,
+		                  Finding,
+		                  URL,
+		                  Details
+				        )
+		         SELECT 198 AS CheckID,
+		                NULL AS DatabaseName,
+		                10 AS Priority,
+		                'Performance' AS FindingsGroup,
+		                'CPU w/Odd Number of Cores' AS Finding,
+		                'http://BrentOzar.com/go/oddity' AS URL,
+		                'Node ' + CONVERT(VARCHAR(10), parent_node_id) + ' has ' + CONVERT(VARCHAR(10), COUNT(cpu_id))
+		                + CASE WHEN COUNT(cpu_id) = 1 THEN ' core assigned to it. This is a really bad NUMA configuration.'
+		                       ELSE ' cores assigned to it. This is a really bad NUMA configuration.'
+		                  END AS Details
+		         FROM   sys.dm_os_schedulers
+		         WHERE  is_online = 1
+		                AND scheduler_id < 255
+		                AND parent_node_id < 64
+		         GROUP BY parent_node_id,
+		                is_online
+		         HAVING ( COUNT(cpu_id) + 2 ) % 2 = 1;    
+		
+		   END;
+
 
 				IF @CheckUserDatabaseObjects = 1
 					BEGIN
@@ -3767,6 +3909,7 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 										WHERE   DatabaseName IS NULL AND CheckID = 163 )
                             AND EXISTS(SELECT * FROM sys.all_objects WHERE name = 'database_query_store_options')
 							BEGIN
+								/* --TOURSTOP03-- */
 								EXEC dbo.sp_MSforeachdb 'USE [?];
 			                            INSERT INTO #BlitzResults
 			                            (CheckID,
@@ -3783,35 +3926,38 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 		                              ''Query Store Disabled'',
 		                              ''http://BrentOzar.com/go/querystore'',
 		                              (''The new SQL Server 2016 Query Store feature has not been enabled on this database.'')
-		                              FROM [?].sys.database_query_store_options WHERE desired_state = 0 AND ''?'' NOT IN (''master'', ''model'', ''msdb'', ''tempdb'', ''DWConfiguration'', ''DWDiagnostics'', ''DWQueue'', ''ReportServer'', ''ReportServerTempDB'')';
+		                              FROM [?].sys.database_query_store_options WHERE desired_state = 0 
+									  AND ''?'' NOT IN (''master'', ''model'', ''msdb'', ''tempdb'', ''DWConfiguration'', ''DWDiagnostics'', ''DWQueue'', ''ReportServer'', ''ReportServerTempDB'')';
 							END
 
-						IF NOT EXISTS ( SELECT  1
-										FROM    #SkipChecks
-										WHERE   DatabaseName IS NULL AND CheckID = 182 )
-                            AND EXISTS(SELECT * FROM sys.all_objects WHERE name = 'database_query_store_options')
+						
+							IF @ProductVersionMajor >= 13 AND @ProductVersionMinor < 2149 --CU1 has the fix in it
+							AND NOT EXISTS ( SELECT  1
+											 FROM    #SkipChecks
+											 WHERE   DatabaseName IS NULL AND CheckID = 182 )
 							AND CAST(SERVERPROPERTY('edition') AS VARCHAR(100)) NOT LIKE '%Enterprise%'
 							AND CAST(SERVERPROPERTY('edition') AS VARCHAR(100)) NOT LIKE '%Developer%'
-							BEGIN
-								EXEC dbo.sp_MSforeachdb 'USE [?];
-			                            INSERT INTO #BlitzResults
-			                            (CheckID,
-			                            DatabaseName,
-			                            Priority,
-			                            FindingsGroup,
-			                            Finding,
-			                            URL,
-			                            Details)
-		                              SELECT TOP 1 182,
-		                              ''?'',
-		                              20,
-		                              ''Reliability'',
-		                              ''Query Store Cleanup Disabled'',
-		                              ''http://BrentOzar.com/go/cleanup'',
-		                              (''SQL 2016 RTM has a bug involving dumps that happen every time Query Store cleanup jobs run.'')
-		                              FROM [?].sys.database_query_store_options WHERE desired_state <> 0 AND ''?'' NOT IN (''master'', ''model'', ''msdb'', ''tempdb'', ''DWConfiguration'', ''DWDiagnostics'', ''DWQueue'', ''ReportServer'', ''ReportServerTempDB'')';
+							BEGIN 
+			                SET @StringToExecute = 'INSERT INTO #BlitzResults
+													(CheckID,
+													DatabaseName,
+													Priority,
+													FindingsGroup,
+													Finding,
+													URL,
+													Details)
+													SELECT TOP 1 
+													182,
+													''Server'',
+													20,
+													''Reliability'',
+													''Query Store Cleanup Disabled'',
+													''http://BrentOzar.com/go/cleanup'',
+													(''SQL 2016 RTM has a bug involving dumps that happen every time Query Store cleanup jobs run. This is fixed in CU1 and later: https://sqlserverupdates.com/sql-server-2016-updates/'')
+													FROM    sys.databases AS d
+													WHERE   d.is_query_store_on = 1;'
+							EXECUTE(@StringToExecute)
 							END
-
 
 				        IF NOT EXISTS ( SELECT  1
 								        FROM    #SkipChecks
@@ -3938,7 +4084,7 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 		                                  ''Licensing'',
 		                                  ''Enterprise Edition Features In Use'',
 		                                  ''http://BrentOzar.com/go/ee'',
-		                                  (''The ['' + DB_NAME() + ''] database is using '' + feature_name + ''.  If this database is restored onto a Standard Edition server, the restore will fail.'')
+		                                  (''The ['' + DB_NAME() + ''] database is using '' + feature_name + ''.  If this database is restored onto a Standard Edition server, the restore will fail on versions prior to 2016 SP1.'')
 		                                  FROM [?].sys.dm_db_persisted_sku_features';
 							        END;
 					        END
@@ -4522,6 +4668,41 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 						        EXEC dbo.sp_MSforeachdb 'USE [?]; INSERT INTO #BlitzResults (CheckID, DatabaseName, Priority, FindingsGroup, Finding, URL, Details) SELECT DISTINCT 80, DB_NAME(), 170, ''Reliability'', ''Max File Size Set'', ''http://BrentOzar.com/go/maxsize'', (''The ['' + DB_NAME() + ''] database file '' + name + '' has a max file size set to '' + CAST(CAST(max_size AS BIGINT) * 8 / 1024 AS VARCHAR(100)) + ''MB. If it runs out of space, the database will stop working even though there may be drive space available.'') FROM sys.database_files WHERE max_size <> 268435456 AND max_size <> -1 AND type <> 2 AND name <> ''DWDiagnostics'' ';
 					        END
 
+	
+						/* Check if columnstore indexes are in use - for Github issue #615 */
+				        IF NOT EXISTS ( SELECT  1
+								        FROM    #SkipChecks
+								        WHERE   DatabaseName IS NULL AND CheckID = 74 ) /* Trace flags */
+					        BEGIN
+								TRUNCATE TABLE #TemporaryDatabaseResults;
+						        EXEC dbo.sp_MSforeachdb 'USE [?]; IF EXISTS(SELECT * FROM sys.indexes WHERE type IN (5,6)) INSERT INTO #TemporaryDatabaseResults (DatabaseName, Finding) VALUES (DB_NAME(), ''Yup'')';
+								IF EXISTS (SELECT * FROM #TemporaryDatabaseResults) SET @ColumnStoreIndexesInUse = 1;
+					        END
+
+
+						/* Non-Default Database Scoped Config - Github issue #598 */
+				        IF EXISTS ( SELECT * FROM sys.all_objects WHERE [name] = 'database_scoped_configurations' )
+					        BEGIN
+								INSERT INTO #DatabaseScopedConfigurationDefaults (configuration_id, [name], default_value, default_value_for_secondary, CheckID)
+									SELECT 1, 'MAXDOP', 0, NULL, 194
+									UNION ALL
+									SELECT 2, 'LEGACY_CARDINALITY_ESTIMATION', 0, NULL, 195
+									UNION ALL
+									SELECT 3, 'PARAMETER_SNIFFING', 1, NULL, 196
+									UNION ALL
+									SELECT 4, 'QUERY_OPTIMIZER_HOTFIXES', 0, NULL, 197;
+						        EXEC dbo.sp_MSforeachdb 'USE [?]; INSERT INTO #BlitzResults (CheckID, DatabaseName, Priority, FindingsGroup, Finding, URL, Details) 
+									SELECT def1.CheckID, DB_NAME(), 210, ''Non-Default Database Scoped Config'', dsc.[name], ''http://BrentOzar.com/go/dbscope'', (''Set value: '' + COALESCE(CAST(dsc.value AS NVARCHAR(100)),''Empty'') + '' Default: '' + COALESCE(CAST(def1.default_value AS NVARCHAR(100)),''Empty'') + '' Set value for secondary: '' + COALESCE(CAST(dsc.value_for_secondary AS NVARCHAR(100)),''Empty'') + '' Default value for secondary: '' + COALESCE(CAST(def1.default_value_for_secondary AS NVARCHAR(100)),''Empty''))
+									FROM [?].sys.database_scoped_configurations dsc 
+									INNER JOIN #DatabaseScopedConfigurationDefaults def1 ON dsc.configuration_id = def1.configuration_id
+									LEFT OUTER JOIN #DatabaseScopedConfigurationDefaults def ON dsc.configuration_id = def.configuration_id AND (dsc.value = def.default_value OR dsc.value IS NULL) AND (dsc.value_for_secondary = def.default_value_for_secondary OR dsc.value_for_secondary IS NULL)
+									LEFT OUTER JOIN #SkipChecks sk ON def.CheckID = sk.CheckID AND (sk.DatabaseName IS NULL OR sk.DatabaseName = DB_NAME())
+									WHERE def.configuration_id IS NULL AND sk.CheckID IS NULL ORDER BY 1';
+					        END
+
+
+
+	
 					END /* IF @CheckUserDatabaseObjects = 1 */
 
 				IF @CheckProcedureCache = 1
@@ -5090,7 +5271,8 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 										200 AS Priority ,
 										'Informational' AS FindingsGroup ,
 										'TraceFlag On' AS Finding ,
-										'http://www.BrentOzar.com/go/traceflags/' AS URL ,
+										CASE WHEN [T].[TraceFlag] = '834'  AND @ColumnStoreIndexesInUse = 1 THEN 'https://support.microsoft.com/en-us/kb/3210239'
+											 ELSE'http://www.BrentOzar.com/go/traceflags/' END AS URL ,
 										'Trace flag ' + 
 										CASE WHEN [T].[TraceFlag] = '2330' THEN ' 2330 enabled globally. Using this trace Flag disables missing index requests'
 											 WHEN [T].[TraceFlag] = '1211' THEN ' 1211 enabled globally. Using this Trace Flag disables lock escalation when you least expect it. No Bueno!'
@@ -5100,7 +5282,8 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 											 WHEN [T].[TraceFlag] = '1806'  THEN ' 1806 enabled globally. Using this Trace Flag disables instant file initialization. I question your sanity.'
 											 WHEN [T].[TraceFlag] = '3505'  THEN ' 3505 enabled globally. Using this Trace Flag disables Checkpoints. Probably not the wisest idea.'
 											 WHEN [T].[TraceFlag] = '8649'  THEN ' 8649 enabled globally. Using this Trace Flag drops cost thresholf for parallelism down to 0. I hope this is a dev server.'
-										     ELSE [T].[TraceFlag] + ' is enabled globally.' END 
+										     WHEN [T].[TraceFlag] = '834' AND @ColumnStoreIndexesInUse = 1 THEN ' 834 is enabled globally. Using this Trace Flag with Columnstore Indexes is not a great idea.'
+											 ELSE [T].[TraceFlag] + ' is enabled globally.' END 
 										AS Details
 								FROM    #TraceStatus T
 					END
@@ -5295,7 +5478,7 @@ IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50
 					BEGIN
 
 /*This checks Windows version. It would be better if Microsoft gave everything a separate build number, but whatever.*/
-IF @ProductVersionMajor >= 10 AND @ProductVersionMinor >= 50 
+IF @ProductVersionMajor >= 10
 			   AND NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 172 )
@@ -5369,6 +5552,29 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 							[dopm].[locked_page_allocations_kb] > 0;
 					END; 
 
+			/* Server Info - Locked Pages In Memory Enabled - Check 166 - SQL Server 2016 SP1 and newer */
+						IF NOT EXISTS ( SELECT  1
+										FROM    #SkipChecks
+										WHERE   DatabaseName IS NULL AND CheckID = 166 )
+							AND EXISTS ( SELECT  *
+											FROM    sys.all_objects o
+													INNER JOIN sys.all_columns c ON o.object_id = c.object_id
+											WHERE   o.name = 'dm_os_sys_info'
+													AND c.name = 'sql_memory_model' )
+							BEGIN
+										SET @StringToExecute = 'INSERT INTO #BlitzResults (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+			SELECT  166 AS CheckID ,
+			250 AS Priority ,
+			''Server Info'' AS FindingsGroup ,
+			''Memory Model Unconventional'' AS Finding ,
+			''http://BrentOzar.com/go/lpim'' AS URL ,
+			''Memory Model: '' + CAST(sql_memory_model_desc AS NVARCHAR(100))
+			FROM sys.dm_os_sys_info WHERE sql_memory_model <> 1';
+										EXECUTE(@StringToExecute);
+									END
+
+
+
 			/*
 			Starting with SQL Server 2014 SP2, Instant File Initialization 
 			is logged in the SQL Server Error Log.
@@ -5391,13 +5597,38 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 										  Details
 										)
 										SELECT
-												184 AS [CheckID] ,
+												193 AS [CheckID] ,
 												250 AS [Priority] ,
 												'Server Info' AS [FindingsGroup] ,
 												'Instant File Initialization Enabled' AS [Finding] ,
-												'' AS [URL] ,
+												'http://BrentOzar.com/go/instant' AS [URL] ,
 												'The service account has the Perform Volume Maintenance Tasks permission.'
 						END; 
+
+			/* Server Info - Instant File Initialization Not Enabled - Check 192 - SQL Server 2016 SP1 and newer */
+						IF NOT EXISTS ( SELECT  1
+										FROM    #SkipChecks
+										WHERE   DatabaseName IS NULL AND CheckID = 192 )
+							AND EXISTS ( SELECT  *
+											FROM    sys.all_objects o
+													INNER JOIN sys.all_columns c ON o.object_id = c.object_id
+											WHERE   o.name = 'dm_server_services'
+													AND c.name = 'instant_file_initialization_enabled' )
+							BEGIN
+										SET @StringToExecute = 'INSERT INTO #BlitzResults (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+			SELECT  192 AS CheckID ,
+			50 AS Priority ,
+			''Server Info'' AS FindingsGroup ,
+			''Instant File Initialization Not Enabled'' AS Finding ,
+			''http://BrentOzar.com/go/instant'' AS URL ,
+			''Consider enabling IFI for faster restores and data file growths.''
+			FROM sys.dm_server_services WHERE instant_file_initialization_enabled <> ''Y'' AND filename LIKE ''%sqlservr.exe%''';
+										EXECUTE(@StringToExecute);
+									END
+
+
+
+
 
 					IF NOT EXISTS ( SELECT  1
 									FROM    #SkipChecks
@@ -5790,7 +6021,7 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 
 					END
 
-				/* Add credits for the nice folks who put so much time into building and maintaining this for free: */
+			/* Add credits for the nice folks who put so much time into building and maintaining this for free: */
 				INSERT  INTO #BlitzResults
 						( CheckID ,
 						  Priority ,
@@ -6073,6 +6304,7 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 							ORDER BY Priority ,
 									FindingsGroup ,
 									Finding ,
+									DatabaseName ,
 									Details;
 						END
 					ELSE IF @OutputXMLasNVARCHAR = 1 AND @OutputType <> 'NONE'
@@ -6090,6 +6322,7 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 							ORDER BY Priority ,
 									FindingsGroup ,
 									Finding ,
+									DatabaseName ,
 									Details;
 						END
 					ELSE IF @OutputType = 'MARKDOWN'
@@ -6115,6 +6348,7 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 						END
 					ELSE IF @OutputType <> 'NONE'
 						BEGIN
+							/* --TOURSTOP05-- */
 							SELECT  [Priority] ,
 									[FindingsGroup] ,
 									[Finding] ,
@@ -6128,6 +6362,7 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 							ORDER BY Priority ,
 									FindingsGroup ,
 									Finding ,
+									DatabaseName ,
 									Details;
 						END
 
