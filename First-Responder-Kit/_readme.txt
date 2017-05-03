@@ -1,6 +1,6 @@
 # The Free SQL Server Download Pack from Brent Ozar Unlimited
 
-(C) 2016, Brent Ozar Unlimited.
+(C) 2017, Brent Ozar Unlimited.
 
 To get the latest version, visit:
 https://www.BrentOzar.com/first-aid/
@@ -30,9 +30,10 @@ sp_BlitzIndex - "How could I tune indexes to make this database faster?" Instruc
 
 ## Got Questions About This Stuff?
 
-To report a bug or suggest an enhancement: http://FirstResponderKit.org
+For support, to report a bug, or suggest an enhancement: http://FirstResponderKit.org
+If you're into Stack, we also patrol here: http://DBA.StackExchange.com
 
-For questions and thank-yous: help@brentozar.com or https://www.brentozar.com/contact
+For compliments and thank-yous: help@brentozar.com or https://www.brentozar.com/contact
 
 For a good time: http://DBAreactions.com
 
