@@ -21,8 +21,8 @@ AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	DECLARE @Version VARCHAR(30);
-	SET @Version = '5.3';
-	SET @VersionDate = '20170501';
+	SET @Version = '2.0';
+	SET @VersionDate = '20171201';
 
 	IF @Help = 1 PRINT '
 	/*
@@ -108,7 +108,11 @@ IF	@WriteBackupsLastHours > 0
 
 SELECT  @crlf = NCHAR(13) + NCHAR(10), 
 		@StartTime = DATEADD(hh, @HoursBack, GETDATE()),
-        @MoreInfoHeader = '<?ClickToSeeDetails -- ' + @crlf, @MoreInfoFooter = @crlf + ' -- ?>';
+        @MoreInfoHeader = N'<?ClickToSeeDetails -- ' + @crlf, @MoreInfoFooter = @crlf + N' -- ?>';
+
+SET @ProductVersion = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128));
+SELECT @ProductVersionMajor = SUBSTRING(@ProductVersion, 1, CHARINDEX('.', @ProductVersion) + 1),
+       @ProductVersionMinor = PARSENAME(CONVERT(VARCHAR(32), @ProductVersion), 2);
 
 CREATE TABLE #Backups
 (
@@ -184,21 +188,21 @@ CREATE TABLE #Recoverability
 		DatabaseName NVARCHAR(128),
 		DatabaseGUID UNIQUEIDENTIFIER,
 		LastBackupRecoveryModel NVARCHAR(60),
-		FirstFullBackupSize BIGINT,
+		FirstFullBackupSizeMB DECIMAL (18,2),
 		FirstFullBackupDate DATETIME,
-		LastFullBackupSize BIGINT,
+		LastFullBackupSizeMB DECIMAL (18,2),
 		LastFullBackupDate DATETIME,
-		AvgFullBackupThroughput DECIMAL (18,2),
+		AvgFullBackupThroughputMB DECIMAL (18,2),
 		AvgFullBackupDurationSeconds INT,
-		AvgDiffBackupThroughput DECIMAL (18,2),
+		AvgDiffBackupThroughputMB DECIMAL (18,2),
 		AvgDiffBackupDurationSeconds INT,
-		AvgLogBackupThroughput DECIMAL (18,2),
+		AvgLogBackupThroughputMB DECIMAL (18,2),
 		AvgLogBackupDurationSeconds INT,
-		AvgFullSize BIGINT,
-		AvgDiffSize BIGINT,
-		AvgLogSize BIGINT,
-		IsBigDiff AS CASE WHEN (AvgFullSize - AvgDiffSize) * .01 > .40 AND (AvgFullSize > 1073741824)  THEN 1 ELSE 0 END,
-		IsBigLog AS CASE WHEN (AvgFullSize - AvgLogSize) * .01 > .20 AND (AvgFullSize > 1073741824) THEN 1 ELSE 0 END
+		AvgFullSizeMB DECIMAL (18,2),
+		AvgDiffSizeMB DECIMAL (18,2),
+		AvgLogSizeMB DECIMAL (18,2),
+		IsBigDiff AS CASE WHEN (AvgFullSizeMB > 10240. AND ((AvgDiffSizeMB * 100.) / AvgFullSizeMB >= 40.))  THEN 1 ELSE 0 END,
+		IsBigLog AS CASE WHEN (AvgFullSizeMB > 10240. AND ((AvgLogSizeMB * 100.) / AvgFullSizeMB >= 20.)) THEN 1 ELSE 0 END
 	);
 
 CREATE TABLE #Trending
@@ -614,44 +618,46 @@ RAISERROR('Gathering RTO worst cases', 0, 1) WITH NOWAIT;
 	SET @StringToExecute += 	N'
 								UPDATE r
 								SET r.LastBackupRecoveryModel = ca.recovery_model,
-									r.LastFullBackupSize = ca.backup_size,
+									r.LastFullBackupSizeMB = ca.compressed_backup_size,
 									r.LastFullBackupDate = ca.backup_finish_date
 								FROM #Recoverability r
 									CROSS APPLY (
-										SELECT TOP 1 b.recovery_model, b.backup_size, b.backup_finish_date
+										SELECT TOP 1 b.recovery_model, (b.compressed_backup_size / 1048576.0) AS compressed_backup_size, b.backup_finish_date
 										FROM ' + QUOTENAME(@MSDBName) + N'.dbo.backupset AS b
 										WHERE r.DatabaseName = b.database_name
 										AND r.DatabaseGUID = b.database_guid
 										AND b.type = ''D''
+										AND b.backup_finish_date > @StartTime
 										ORDER BY b.backup_finish_date DESC
 												) ca;'
 
 	IF @Debug = 1
 		PRINT @StringToExecute;
 
-	EXEC sys.sp_executesql @StringToExecute;
+	EXEC sys.sp_executesql @StringToExecute, N'@StartTime DATETIME2', @StartTime;
 
 	/*Find first backup size and date*/
 	SET @StringToExecute =N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 
 	SET @StringToExecute += N'
 							UPDATE r
-							SET r.FirstFullBackupSize = ca.backup_size,
+							SET r.FirstFullBackupSizeMB = ca.compressed_backup_size,
 								r.FirstFullBackupDate = ca.backup_finish_date
 							FROM #Recoverability r
 								CROSS APPLY (
-									SELECT TOP 1 b.backup_size, b.backup_finish_date
+									SELECT TOP 1 (b.compressed_backup_size / 1048576.0) AS compressed_backup_size, b.backup_finish_date
 									FROM ' + QUOTENAME(@MSDBName) + N'.dbo.backupset AS b
 									WHERE r.DatabaseName = b.database_name 
 									AND r.DatabaseGUID = b.database_guid
 									AND b.type = ''D''
+									AND b.backup_finish_date > @StartTime
 									ORDER BY b.backup_finish_date ASC
 											) ca;'
 
 	IF @Debug = 1
 		PRINT @StringToExecute;
 
-	EXEC sys.sp_executesql @StringToExecute;
+	EXEC sys.sp_executesql @StringToExecute, N'@StartTime DATETIME2', @StartTime;
 
 
 	/*Find average backup throughputs for full, diff, and log*/
@@ -659,94 +665,100 @@ RAISERROR('Gathering RTO worst cases', 0, 1) WITH NOWAIT;
 
 	SET @StringToExecute += N'
 							UPDATE r
-							SET r.AvgFullBackupThroughput = ca_full.AvgFullSpeed,
-								r.AvgDiffBackupThroughput = ca_diff.AvgDiffSpeed,
-								r.AvgLogBackupThroughput = ca_log.AvgLogSpeed,
+							SET r.AvgFullBackupThroughputMB = ca_full.AvgFullSpeed,
+								r.AvgDiffBackupThroughputMB = ca_diff.AvgDiffSpeed,
+								r.AvgLogBackupThroughputMB = ca_log.AvgLogSpeed,
 								r.AvgFullBackupDurationSeconds = AvgFullDuration,
 								r.AvgDiffBackupDurationSeconds = AvgDiffDuration,
 								r.AvgLogBackupDurationSeconds = AvgLogDuration
 							FROM #Recoverability AS r
 							OUTER APPLY (
 								SELECT b.database_name, 
-									   CAST(AVG(( backup_size / ( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) / 1048576 )) AS INT) AS AvgFullSpeed,
-									   CAST(AVG( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) AS INT) AS AvgFullDuration
+									   AVG( b.compressed_backup_size / ( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) / 1048576.0 ) AS AvgFullSpeed,
+									   AVG( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) AS AvgFullDuration
 								FROM ' + QUOTENAME(@MSDBName) + N'.dbo.backupset b
 								WHERE r.DatabaseName = b.database_name
 								AND r.DatabaseGUID = b.database_guid
 								AND b.type = ''D'' 
 								AND DATEDIFF(SECOND, b.backup_start_date, b.backup_finish_date) > 0
+								AND b.backup_finish_date > @StartTime
 								GROUP BY b.database_name
 										) ca_full
 							OUTER APPLY (
 								SELECT b.database_name, 
-									   CAST(AVG(( backup_size / ( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) / 1048576 )) AS INT) AS AvgDiffSpeed,
-									   CAST(AVG( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) AS INT) AS AvgDiffDuration
+									   AVG( b.compressed_backup_size / ( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) / 1048576.0 ) AS AvgDiffSpeed,
+									   AVG( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) AS AvgDiffDuration
 								FROM ' + QUOTENAME(@MSDBName) + N'.dbo.backupset b
 								WHERE r.DatabaseName = b.database_name
 								AND r.DatabaseGUID = b.database_guid
 								AND b.type = ''I'' 
 								AND DATEDIFF(SECOND, b.backup_start_date, b.backup_finish_date) > 0
+								AND b.backup_finish_date > @StartTime
 								GROUP BY b.database_name
 										) ca_diff
 							OUTER APPLY (
 								SELECT b.database_name, 
-									   CAST(AVG(( backup_size / ( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) / 1048576 )) AS INT) AS AvgLogSpeed,
-									   CAST(AVG( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) AS INT) AS AvgLogDuration
+									   AVG( b.compressed_backup_size / ( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) / 1048576.0 ) AS AvgLogSpeed,
+									   AVG( DATEDIFF(ss, b.backup_start_date, b.backup_finish_date) ) AS AvgLogDuration
 								FROM ' + QUOTENAME(@MSDBName) + N'.dbo.backupset b
 								WHERE r.DatabaseName = b.database_name
 								AND r.DatabaseGUID = b.database_guid
 								AND b.type = ''L''
 								AND DATEDIFF(SECOND, b.backup_start_date, b.backup_finish_date) > 0
+								AND b.backup_finish_date > @StartTime
 								GROUP BY b.database_name
 										) ca_log;'
 
 	IF @Debug = 1
 		PRINT @StringToExecute;
 
-	EXEC sys.sp_executesql @StringToExecute;
+	EXEC sys.sp_executesql @StringToExecute, N'@StartTime DATETIME2', @StartTime;
 
 
 	/*Find max and avg diff and log sizes*/
 	SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 
-	SET @StringToExecute += '
+	SET @StringToExecute += N'
 							UPDATE r
-							 SET r.AvgFullSize = fulls.avg_full_size,
-							 	 r.AvgDiffSize = diffs.avg_diff_size,
-							 	 r.AvgLogSize = logs.avg_log_size
+							 SET r.AvgFullSizeMB = fulls.avg_full_size,
+							 	 r.AvgDiffSizeMB = diffs.avg_diff_size,
+							 	 r.AvgLogSizeMB = logs.avg_log_size
 							 FROM #Recoverability AS r
 							 OUTER APPLY (
-							 	SELECT b.database_name, AVG(b.backup_size) AS avg_full_size
+							 	SELECT b.database_name, AVG(b.compressed_backup_size / 1048576.0) AS avg_full_size
 							 	FROM ' + QUOTENAME(@MSDBName) + N'.dbo.backupset AS b
 							 	WHERE r.DatabaseName = b.database_name
 								AND r.DatabaseGUID = b.database_guid
 							 	AND b.type = ''D''
+								AND b.backup_finish_date > @StartTime
 							 	GROUP BY b.database_name
 							 			) AS fulls
 							 OUTER APPLY (
-							 	SELECT b.database_name, AVG(b.backup_size) AS avg_diff_size
+							 	SELECT b.database_name, AVG(b.compressed_backup_size / 1048576.0) AS avg_diff_size
 							 	FROM ' + QUOTENAME(@MSDBName) + N'.dbo.backupset AS b
 							 	WHERE r.DatabaseName = b.database_name
 								AND r.DatabaseGUID = b.database_guid
 							 	AND b.type = ''I''
+								AND b.backup_finish_date > @StartTime
 							 	GROUP BY b.database_name
 							 			) AS diffs
 							 OUTER APPLY (
-							 	SELECT b.database_name, AVG(b.backup_size) AS avg_log_size
+							 	SELECT b.database_name, AVG(b.compressed_backup_size / 1048576.0) AS avg_log_size
 							 	FROM ' + QUOTENAME(@MSDBName) + N'.dbo.backupset AS b
 							 	WHERE r.DatabaseName = b.database_name
 								AND r.DatabaseGUID = b.database_guid
 							 	AND b.type = ''L''
+								AND b.backup_finish_date > @StartTime
 							 	GROUP BY b.database_name
 							 			) AS logs;'
 
 	IF @Debug = 1
 		PRINT @StringToExecute;
 
-	EXEC sys.sp_executesql @StringToExecute;
+	EXEC sys.sp_executesql @StringToExecute, N'@StartTime DATETIME2', @StartTime;
 	
 /*Trending - only works if backupfile is populated, which means in msdb */
-IF @MSDBName = 'msdb'
+IF @MSDBName = N'msdb'
 BEGIN
 	SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' --+ @crlf;
 
@@ -808,12 +820,13 @@ RAISERROR('Returning data', 0, 1) WITH NOWAIT;
 		LEFT JOIN #Trending t
 		ON r.DatabaseName = t.DatabaseName
 		AND r.DatabaseGUID = t.DatabaseGUID	
+		WHERE r.LastBackupRecoveryModel IS NOT NULL
 		ORDER BY r.DatabaseName
 
 
 RAISERROR('Rules analysis starting', 0, 1) WITH NOWAIT;
 
-/*Looking for non-Agent backups. Agent handles most backups, can expand or change depending on what we find out there*/
+/*Looking for out of band backups by finding most common backup operator user_name and noting backups taken by other user_names*/
 
 	SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 
@@ -971,7 +984,7 @@ RAISERROR('Rules analysis starting', 0, 1) WITH NOWAIT;
 
 	SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 
-	SET @StringToExecute += 'SELECT 
+	SET @StringToExecute += N'SELECT 
 								8 AS CheckId,
 								100 AS [Priority],
 								b.database_name AS [Database Name],
@@ -989,6 +1002,11 @@ RAISERROR('Rules analysis starting', 0, 1) WITH NOWAIT;
 	
 	/*Checking for encrypted backups and the last backup of the encryption key.*/
 
+	/*2014 ONLY*/
+
+IF @ProductVersionMajor >= 12
+	BEGIN
+
 	SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 
 	SET @StringToExecute += N'SELECT 
@@ -999,7 +1017,7 @@ RAISERROR('Rules analysis starting', 0, 1) WITH NOWAIT;
 								''The database '' + QUOTENAME(b.database_name) + '' has had '' + CONVERT(VARCHAR(10), COUNT(*)) + '' '' + b.encryptor_type + '' backups, and the last time a certificate was backed up is '
 								+ CASE WHEN LOWER(@MSDBName) <> N'msdb'
 									THEN + N'...well, that information is on another server, anyway.'' AS [Warning]'
-									ELSE + CONVERT(VARCHAR(30), (SELECT MAX(c.pvt_key_last_backup_date) FROM sys.certificates AS c WHERE c.name NOT LIKE '##%')) + '. AS [Warning]'
+									ELSE + CONVERT(VARCHAR(30), (SELECT MAX(c.pvt_key_last_backup_date) FROM sys.certificates AS c WHERE c.name NOT LIKE '##%')) + N'.'' AS [Warning]'
 									END + 
 							N'
 							FROM   ' + QUOTENAME(@MSDBName) + N'.dbo.backupset AS b
@@ -1012,11 +1030,13 @@ RAISERROR('Rules analysis starting', 0, 1) WITH NOWAIT;
 		INSERT #Warnings ( CheckId, Priority, DatabaseName, Finding, Warning )
 		EXEC sys.sp_executesql @StringToExecute;
 	
+	END
+	
 	/*Looking for backups that have BULK LOGGED data in them -- this can screw up point in time LOG recovery.*/
 
 	SET @StringToExecute =N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 
-	SET @StringToExecute += 'SELECT 
+	SET @StringToExecute += N'SELECT 
 		10 AS CheckId,
 		100 AS [Priority],
 		b.database_name AS [Database Name],
@@ -1036,7 +1056,7 @@ RAISERROR('Rules analysis starting', 0, 1) WITH NOWAIT;
 
 	SET @StringToExecute =N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 
-	SET @StringToExecute += 'SELECT 
+	SET @StringToExecute += N'SELECT 
 		11 AS CheckId,
 		100 AS [Priority],
 		b.database_name AS [Database Name],
@@ -1057,12 +1077,12 @@ RAISERROR('Rules analysis starting', 0, 1) WITH NOWAIT;
 
 	SET @StringToExecute =N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 
-	SET @StringToExecute += 'SELECT 
+	SET @StringToExecute += N'SELECT 
 		12 AS CheckId,
 		100 AS [Priority],
 		b.database_name AS [Database Name],
 		''Uncompressed backups'' AS [Finding],
-		''The database '' + QUOTENAME(b.database_name) + '' has had '' + CONVERT(VARCHAR(10), COUNT(*)) + '' uncompressed backups in the last 30 days. This is a free way to save time and space. And SPACETIME.'' AS [Warning]
+		''The database '' + QUOTENAME(b.database_name) + '' has had '' + CONVERT(VARCHAR(10), COUNT(*)) + '' uncompressed backups in the last 30 days. This is a free way to save time and space. And SPACETIME. If your version of SQL supports it.'' AS [Warning]
 	FROM   ' + QUOTENAME(@MSDBName) + '.dbo.backupset AS b
 	WHERE backup_size = compressed_backup_size AND type = ''D''
 	AND b.backup_finish_date >= DATEADD(DAY, -30, SYSDATETIME())
@@ -1126,14 +1146,6 @@ RAISERROR('Pushing backup history to listener', 0, 1) WITH NOWAIT;
 DECLARE @msg NVARCHAR(4000) = N'';
 DECLARE @RemoteCheck TABLE (c INT NULL);
 
-/*
-	@AGName NVARCHAR(256) NULL,
-	@WriteBackupsToDatabaseName NVARCHAR(256) = 'msdb',
-	@WriteBackupsToListenerName NVARCHAR(256),
-    @WriteBackupsToDatabaseName NVARCHAR(256),
-    @WriteBackupsLastHours INT = 24,
-	@WriteBackupsBatchSize INT = 5000,
-*/
 
 IF @WriteBackupsToDatabaseName IS NULL
 	BEGIN
@@ -1182,8 +1194,8 @@ END
 
 	SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 
-	SET @StringToExecute += 'SELECT TOP 1 1 FROM ' 
-							+ QUOTENAME(@WriteBackupsToListenerName) + '.master.sys.databases d WHERE d.name = @i_WriteBackupsToDatabaseName;'
+	SET @StringToExecute += N'SELECT TOP 1 1 FROM ' 
+							+ QUOTENAME(@WriteBackupsToListenerName) + N'.master.sys.databases d WHERE d.name = @i_WriteBackupsToDatabaseName;'
 
 	IF @Debug = 1
 		PRINT @StringToExecute;
@@ -1201,7 +1213,7 @@ END
 
 	SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 
-	SET @StringToExecute += 'SELECT TOP 1 1 FROM ' 
+	SET @StringToExecute += N'SELECT TOP 1 1 FROM ' 
 							+ QUOTENAME(@WriteBackupsToListenerName) + '.' + QUOTENAME(@WriteBackupsToDatabaseName) + '.sys.tables WHERE name = ''backupset'' AND SCHEMA_NAME(schema_id) = ''dbo'';
 							' + @crlf;
 
@@ -1220,10 +1232,19 @@ END
 		
 		SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 
-		SET @StringToExecute += N'SELECT TOP 1 *
-								 INTO ' + QUOTENAME(@WriteBackupsToDatabaseName) + N'.dbo.backupset
-								 FROM ' + N'msdb.dbo.backupset
-								 WHERE 1 = 2
+		SET @StringToExecute += N'CREATE TABLE ' + QUOTENAME(@WriteBackupsToDatabaseName) + N'.dbo.backupset
+											( backup_set_id INT IDENTITY(1, 1), backup_set_uuid UNIQUEIDENTIFIER, media_set_id INT, first_family_number TINYINT, first_media_number SMALLINT, 
+											  last_family_number TINYINT, last_media_number SMALLINT, catalog_family_number TINYINT, catalog_media_number SMALLINT, position INT, expiration_date DATETIME, 
+											  software_vendor_id INT, name NVARCHAR(128), description NVARCHAR(255), user_name NVARCHAR(128), software_major_version TINYINT, software_minor_version TINYINT, 
+											  software_build_version SMALLINT, time_zone SMALLINT, mtf_minor_version TINYINT, first_lsn NUMERIC(25, 0), last_lsn NUMERIC(25, 0), checkpoint_lsn NUMERIC(25, 0), 
+											  database_backup_lsn NUMERIC(25, 0), database_creation_date DATETIME, backup_start_date DATETIME, backup_finish_date DATETIME, type CHAR(1), sort_order SMALLINT, 
+											  code_page SMALLINT, compatibility_level TINYINT, database_version INT, backup_size NUMERIC(20, 0), database_name NVARCHAR(128), server_name NVARCHAR(128), 
+											  machine_name NVARCHAR(128), flags INT, unicode_locale INT, unicode_compare_style INT, collation_name NVARCHAR(128), is_password_protected BIT, recovery_model NVARCHAR(60), 
+											  has_bulk_logged_data BIT, is_snapshot BIT, is_readonly BIT, is_single_user BIT, has_backup_checksums BIT, is_damaged BIT, begins_log_chain BIT, has_incomplete_metadata BIT, 
+											  is_force_offline BIT, is_copy_only BIT, first_recovery_fork_guid UNIQUEIDENTIFIER, last_recovery_fork_guid UNIQUEIDENTIFIER, fork_point_lsn NUMERIC(25, 0), database_guid UNIQUEIDENTIFIER, 
+											  family_guid UNIQUEIDENTIFIER, differential_base_lsn NUMERIC(25, 0), differential_base_guid UNIQUEIDENTIFIER, compressed_backup_size NUMERIC(20, 0), key_algorithm NVARCHAR(32), 
+											  encryptor_thumbprint VARBINARY(20) , encryptor_type NVARCHAR(32) 
+											);
 								 ' + @crlf;
 		
 		SET @InnerStringToExecute = N'EXEC( ''' + @StringToExecute +  ''' ) AT ' + QUOTENAME(@WriteBackupsToListenerName) + N';'
@@ -1233,13 +1254,14 @@ END
 		
 		EXEC sp_executesql @InnerStringToExecute
 
+
 		RAISERROR('We''ll even make the indexes!', 0, 1) WITH NOWAIT
 
 		/*Checking for and creating the PK/CX*/
 
 		SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 		
-		SET @StringToExecute += '
+		SET @StringToExecute += N'
 		
 		IF NOT EXISTS (
 		SELECT t.name, i.name
@@ -1268,7 +1290,7 @@ END
 
 		SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 		
-		SET @StringToExecute += 'IF NOT EXISTS (
+		SET @StringToExecute += N'IF NOT EXISTS (
 		SELECT t.name, i.name
 		FROM ' + QUOTENAME(@WriteBackupsToDatabaseName) + N'.sys.tables AS t
 		JOIN ' + QUOTENAME(@WriteBackupsToDatabaseName) + N'.sys.indexes AS i  
@@ -1322,7 +1344,7 @@ END
 
 		SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 		
-		SET @StringToExecute += 'IF NOT EXISTS (
+		SET @StringToExecute += N'IF NOT EXISTS (
 		SELECT t.name, i.name
 		FROM ' + QUOTENAME(@WriteBackupsToDatabaseName) + N'.sys.tables AS t
 		JOIN ' + QUOTENAME(@WriteBackupsToDatabaseName) + N'.sys.indexes AS i  
@@ -1349,7 +1371,7 @@ END
 
 		SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;' + @crlf;
 		
-		SET @StringToExecute += 'IF NOT EXISTS (
+		SET @StringToExecute += N'IF NOT EXISTS (
 		SELECT t.name, i.name
 		FROM ' + QUOTENAME(@WriteBackupsToDatabaseName) + N'.sys.tables AS t
 		JOIN ' + QUOTENAME(@WriteBackupsToDatabaseName) + N'.sys.indexes AS i  
@@ -1438,11 +1460,18 @@ END
 									' 
 		SET @StringToExecute += N' (database_name, database_guid, backup_set_uuid, type, backup_size, backup_start_date, backup_finish_date, media_set_id,
 									compressed_backup_size, recovery_model, server_name, machine_name, first_lsn, last_lsn, user_name, compatibility_level, 
-									is_password_protected, is_snapshot, is_readonly, is_single_user, has_backup_checksums, is_damaged, encryptor_type, has_bulk_logged_data)' + @crlf;
+									is_password_protected, is_snapshot, is_readonly, is_single_user, has_backup_checksums, is_damaged, ' + CASE WHEN @ProductVersionMajor >= 12 
+																																				THEN + N'encryptor_type, has_bulk_logged_data)' + @crlf
+																																				ELSE + N'has_bulk_logged_data)' + @crlf
+																																				END
+		
 		SET @StringToExecute +=N'
 									SELECT database_name, database_guid, backup_set_uuid, type, backup_size, backup_start_date, backup_finish_date, media_set_id,
 									compressed_backup_size, recovery_model, server_name, machine_name, first_lsn, last_lsn, user_name, compatibility_level, 
-									is_password_protected, is_snapshot, is_readonly, is_single_user, has_backup_checksums, is_damaged, encryptor_type, has_bulk_logged_data'  + @crlf;
+									is_password_protected, is_snapshot, is_readonly, is_single_user, has_backup_checksums, is_damaged, ' + CASE WHEN @ProductVersionMajor >= 12 
+																																				THEN + N'encryptor_type, has_bulk_logged_data' + @crlf
+																																				ELSE + N'has_bulk_logged_data' + @crlf
+																																				END
 		SET @StringToExecute +=N'
 								 FROM msdb.dbo.backupset b
 								 WHERE 1=1
