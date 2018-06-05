@@ -26,8 +26,8 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE @Version VARCHAR(30);
-SET @Version = '1.3';
-SET @VersionDate = '20180301';
+SET @Version = '1.6';
+SET @VersionDate = '20180601';
 
 
 	IF @Help = 1 PRINT '
@@ -65,6 +65,17 @@ SET @VersionDate = '20180301';
 	To learn more, visit http://FirstResponderKit.org where you can download new
 	versions for free, watch training videos on how it works, get more info on
 	the findings, contribute your own code, and more.
+
+	Known limitations of this version:
+	 - Only 2012+ is supported (2008 and 2008R2 are kaput in 2019, so I''m not putting time into them)
+	 - If your tables have weird characters in them (https://en.wikipedia.org/wiki/List_of_XML_and_HTML_character_entity_references) you may get errors trying to parse the XML.
+	   I took a long look at this one, and:
+		1) Trying to account for all the weird places these could crop up is a losing effort. 
+		2) Replace is slow af on lots of XML.
+	- Your mom.
+
+
+
 
 	Unknown limitations of this version:
 	 - None.  (If we knew them, they would be known. Duh.)
@@ -178,6 +189,7 @@ SET @VersionDate = '20180301';
 					dd.deadlock_xml.value('(//deadlock/victim-list/victimProcess/@id)[1]', 'NVARCHAR(256)') AS victim_id,
 					ca.dp.value('@id', 'NVARCHAR(256)') AS id,
                     ca.dp.value('@currentdb', 'BIGINT') AS database_id,
+                    ca.dp.value('@priority', 'SMALLINT') AS priority,
                     ca.dp.value('@logused', 'BIGINT') AS log_used,
                     ca.dp.value('@waitresource', 'NVARCHAR(256)') AS wait_resource,
                     ca.dp.value('@waittime', 'BIGINT') AS wait_time,
@@ -192,7 +204,8 @@ SET @VersionDate = '20180301';
                     ca.dp.value('@loginname', 'NVARCHAR(256)') AS login_name,
                     ca.dp.value('@isolationlevel', 'NVARCHAR(256)') AS isolation_level,
                     ca2.ib.query('.') AS input_buffer,
-                    ca.dp.query('.') AS process_xml
+                    ca.dp.query('.') AS process_xml,
+                    dd.deadlock_xml.query('/event/data/value/deadlock') AS deadlock_graph
         INTO        #deadlock_process
         FROM        #deadlock_data AS dd
         CROSS APPLY dd.deadlock_xml.nodes('//deadlock/process-list/process') AS ca(dp)
@@ -233,6 +246,7 @@ SET @VersionDate = '20180301';
 					ca.dr.value('@dbid', 'BIGINT') AS database_id,
                     ca.dr.value('@objectname', 'NVARCHAR(1000)') AS object_name,
                     ca.dr.value('@mode', 'NVARCHAR(256)') AS lock_mode,
+					ca.dr.value('@indexname', 'NVARCHAR(256)') AS index_name,
                     w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
                     w.l.value('@mode', 'NVARCHAR(256)') AS waiter_mode,
                     o.l.value('@id', 'NVARCHAR(256)') AS owner_id,
@@ -253,6 +267,7 @@ SET @VersionDate = '20180301';
 					ca.dr.value('@dbid', 'BIGINT') AS database_id,
                     ca.dr.value('@objectname', 'NVARCHAR(256)') AS object_name,
                     ca.dr.value('@mode', 'NVARCHAR(256)') AS lock_mode,
+					ca.dr.value('@indexname', 'NVARCHAR(256)') AS index_name,
                     w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
                     w.l.value('@mode', 'NVARCHAR(256)') AS waiter_mode,
                     o.l.value('@id', 'NVARCHAR(256)') AS owner_id,
@@ -270,6 +285,7 @@ SET @VersionDate = '20180301';
 					ca.dr.value('@dbid', 'BIGINT') AS database_id,
                     ca.dr.value('@objectname', 'NVARCHAR(256)') AS object_name,
                     ca.dr.value('@mode', 'NVARCHAR(256)') AS lock_mode,
+					ca.dr.value('@indexname', 'NVARCHAR(256)') AS index_name,
                     w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
                     w.l.value('@mode', 'NVARCHAR(256)') AS waiter_mode,
                     o.l.value('@id', 'NVARCHAR(256)') AS owner_id,
@@ -287,6 +303,7 @@ SET @VersionDate = '20180301';
 					ca.dr.value('@dbid', 'BIGINT') AS database_id,
                     ca.dr.value('@objectname', 'NVARCHAR(256)') AS object_name,
                     ca.dr.value('@mode', 'NVARCHAR(256)') AS lock_mode,
+					ca.dr.value('@indexname', 'NVARCHAR(256)') AS index_name,
                     w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
                     w.l.value('@mode', 'NVARCHAR(256)') AS waiter_mode,
                     o.l.value('@id', 'NVARCHAR(256)') AS owner_id,
@@ -297,12 +314,39 @@ SET @VersionDate = '20180301';
         CROSS APPLY ca.dr.nodes('//owner-list/owner') AS o(l)
 		OPTION ( RECOMPILE );
 
-		/*Parse parallel deadlocks*/
+
+		/*This parses row group locks*/
+        INSERT #deadlock_owner_waiter
         SELECT      dr.event_date,
+					ca.dr.value('@dbid', 'BIGINT') AS database_id,
+                    ca.dr.value('@objectname', 'NVARCHAR(256)') AS object_name,
+                    ca.dr.value('@mode', 'NVARCHAR(256)') AS lock_mode,
+					ca.dr.value('@indexname', 'NVARCHAR(256)') AS index_name,
+                    w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
+                    w.l.value('@mode', 'NVARCHAR(256)') AS waiter_mode,
+                    o.l.value('@id', 'NVARCHAR(256)') AS owner_id,
+                    o.l.value('@mode', 'NVARCHAR(256)') AS owner_mode
+        FROM        #deadlock_resource AS dr
+        CROSS APPLY dr.resource_xml.nodes('//resource-list/rowgrouplock') AS ca(dr)
+        CROSS APPLY ca.dr.nodes('//waiter-list/waiter') AS w(l)
+        CROSS APPLY ca.dr.nodes('//owner-list/owner') AS o(l)
+		OPTION ( RECOMPILE );
+
+
+		/*Parse parallel deadlocks*/
+        SELECT		dr.event_date,
 					ca.dr.value('@id', 'NVARCHAR(256)') AS id,
                     ca.dr.value('@WaitType', 'NVARCHAR(256)') AS wait_type,
                     ca.dr.value('@nodeId', 'BIGINT') AS node_id,
-                    w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
+					/* These columns are in 2017 CU5 ONLY */
+					ca.dr.value('@waiterType', 'NVARCHAR(256)') AS waiter_type,
+					ca.dr.value('@ownerActivity', 'NVARCHAR(256)') AS owner_activity,
+					ca.dr.value('@waiterActivity', 'NVARCHAR(256)') AS waiter_activity,
+					ca.dr.value('@merging', 'NVARCHAR(256)') AS merging,
+					ca.dr.value('@spilling', 'NVARCHAR(256)') AS spilling,
+					ca.dr.value('@waitingToClose', 'NVARCHAR(256)') AS waiting_to_close,
+                    /*                                    */
+					w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
                     o.l.value('@id', 'NVARCHAR(256)') AS owner_id
         INTO #deadlock_resource_parallel
 		FROM        #deadlock_resource AS dr
@@ -310,6 +354,18 @@ SET @VersionDate = '20180301';
         CROSS APPLY ca.dr.nodes('//waiter-list/waiter') AS w(l)
         CROSS APPLY ca.dr.nodes('//owner-list/owner') AS o(l)
 		OPTION ( RECOMPILE );
+
+		/*Get rid of parallel noise*/
+		WITH c
+		    AS
+		     (
+		         SELECT *, ROW_NUMBER() OVER ( PARTITION BY drp.owner_id, drp.waiter_id ORDER BY drp.event_date ) AS rn
+		         FROM   #deadlock_resource_parallel AS drp
+		     )
+		DELETE FROM c
+		WHERE c.rn > 1;
+
+
 
 		/*Get rid of nonsense*/
 		DELETE dow
@@ -369,11 +425,11 @@ SET @VersionDate = '20180301';
 
 		INSERT #deadlock_findings ( check_id, database_name, object_name, finding_group, finding ) 	
 		SELECT 2 AS check_id, 
-			   DB_NAME(dow.database_id) AS database_name, 
-			   dow.object_name AS object_name,
+			   ISNULL(DB_NAME(dow.database_id), 'UNKNOWN') AS database_name, 
+			   ISNULL(dow.object_name, 'UNKNOWN') AS object_name,
 			   'Total object deadlocks' AS finding_group,
 			   'This object was involved in ' 
-				+ CONVERT(NVARCHAR(20), COUNT_BIG(DISTINCT dow.object_name))
+				+ CONVERT(NVARCHAR(20), COUNT_BIG(DISTINCT dow.event_date))
 				+ ' deadlock(s).'
         FROM   #deadlock_owner_waiter AS dow
 		WHERE 1 = 1
@@ -383,6 +439,27 @@ SET @VersionDate = '20180301';
 		AND (dow.object_name = @ObjectName OR @ObjectName IS NULL)
 		GROUP BY DB_NAME(dow.database_id), dow.object_name
 		OPTION ( RECOMPILE );
+
+		/*Check 2 continuation, number of locks per index*/
+
+		INSERT #deadlock_findings ( check_id, database_name, object_name, finding_group, finding ) 	
+		SELECT 2 AS check_id, 
+			   ISNULL(DB_NAME(dow.database_id), 'UNKNOWN') AS database_name, 
+			   dow.index_name AS index_name,
+			   'Total index deadlocks' AS finding_group,
+			   'This index was involved in ' 
+				+ CONVERT(NVARCHAR(20), COUNT_BIG(DISTINCT dow.event_date))
+				+ ' deadlock(s).'
+        FROM   #deadlock_owner_waiter AS dow
+		WHERE 1 = 1
+		AND (DB_NAME(dow.database_id) = @DatabaseName OR @DatabaseName IS NULL)
+		AND (dow.event_date >= @StartDate OR @StartDate IS NULL)
+		AND (dow.event_date < @EndDate OR @EndDate IS NULL)
+		AND (dow.object_name = @ObjectName OR @ObjectName IS NULL)
+		AND dow.index_name IS NOT NULL
+		GROUP BY DB_NAME(dow.database_id), dow.index_name
+		OPTION ( RECOMPILE );
+
 		
 
 		/*Check 3 looks for Serializable locking*/
@@ -474,6 +551,7 @@ SET @VersionDate = '20180301';
 				AND (dp.host_name = @HostName OR @HostName IS NULL)
 				AND (dp.login_name = @LoginName OR @LoginName IS NULL)
 				AND (dow.object_name = @ObjectName OR @ObjectName IS NULL)
+				AND dow.object_name IS NOT NULL
 				GROUP BY DB_NAME(dp.database_id), SUBSTRING(dp.wait_resource, 1, CHARINDEX(':', dp.wait_resource) - 1), dow.object_name
 							)	
 		INSERT #deadlock_findings ( check_id, database_name, object_name, finding_group, finding ) 
@@ -516,7 +594,7 @@ SET @VersionDate = '20180301';
 					)
 		INSERT #deadlock_findings ( check_id, database_name, object_name, finding_group, finding ) 
 		SELECT DISTINCT 7 AS check_id,
-			   DB_NAME(dow.database_id) AS database_name,
+			   ISNULL(DB_NAME(dow.database_id), 'UNKNOWN') AS database_name,
 			   ds.proc_name AS object_name,
 			   'More Info - Query' AS finding_group,
 			   'EXEC sp_BlitzCache ' +
@@ -618,6 +696,7 @@ SET @VersionDate = '20180301';
 				AND (dow.event_date >= @StartDate OR @StartDate IS NULL)
 				AND (dow.event_date < @EndDate OR @EndDate IS NULL)
 				AND (dow.object_name = @ObjectName OR @ObjectName IS NULL)
+				AND dow.object_name IS NOT NULL
 					)
 		INSERT #deadlock_findings ( check_id, database_name, object_name, finding_group, finding ) 
 		SELECT 9 AS check_id,	
@@ -712,6 +791,7 @@ SET @VersionDate = '20180301';
 		            dp.id,
 					dp.victim_id,
 		            dp.database_id,
+		            dp.priority,
 		            dp.log_used,
 		            dp.wait_resource,
 		            CONVERT(
@@ -743,7 +823,20 @@ SET @VersionDate = '20180301';
 					ROW_NUMBER() OVER ( PARTITION BY dp.event_date ORDER BY dp.event_date ) -1 AS qn,
 					dp.is_victim,
 					ISNULL(dp.owner_mode, '-') AS owner_mode,
-					ISNULL(dp.waiter_mode, '-') AS waiter_mode
+					NULL AS owner_waiter_type,
+					NULL AS owner_activity,
+					NULL AS owner_waiter_activity,
+					NULL AS owner_merging,
+					NULL AS owner_spilling,
+					NULL AS owner_waiting_to_close,
+					ISNULL(dp.waiter_mode, '-') AS waiter_mode,
+					NULL AS waiter_waiter_type,
+					NULL AS waiter_owner_activity,
+					NULL AS waiter_waiter_activity,
+					NULL AS waiter_merging,
+					NULL AS waiter_spilling,
+					NULL AS waiter_waiting_to_close,
+					dp.deadlock_graph
 		     FROM   #deadlock_process AS dp 
 			 WHERE dp.victim_id IS NOT NULL
 			 
@@ -754,6 +847,7 @@ SET @VersionDate = '20180301';
 		            dp.id,
 					dp.victim_id,
 		            dp.database_id,
+		            dp.priority,
 		            dp.log_used,
 		            dp.wait_resource,
 		            CONVERT(XML, N'parallel_deadlock') AS object_names,
@@ -774,7 +868,20 @@ SET @VersionDate = '20180301';
 					ROW_NUMBER() OVER ( PARTITION BY dp.event_date ORDER BY dp.event_date ) -1 AS qn,
 					NULL AS is_victim,
 					cao.wait_type AS owner_mode,
-					caw.wait_type AS waiter_mode
+					cao.waiter_type AS owner_waiter_type,
+					cao.owner_activity AS owner_activity,
+					cao.waiter_activity	AS owner_waiter_activity,
+					cao.merging	AS owner_merging,
+					cao.spilling AS owner_spilling,
+					cao.waiting_to_close AS owner_waiting_to_close,
+					caw.wait_type AS waiter_mode,
+					caw.waiter_type AS waiter_waiter_type,
+					caw.owner_activity AS waiter_owner_activity,
+					caw.waiter_activity	AS waiter_waiter_activity,
+					caw.merging	AS waiter_merging,
+					caw.spilling AS waiter_spilling,
+					caw.waiting_to_close AS waiter_waiting_to_close,
+					dp.deadlock_graph
 		     FROM   #deadlock_process AS dp 
 			 CROSS APPLY (SELECT TOP 1 * FROM  #deadlock_resource_parallel AS drp WHERE drp.owner_id = dp.id AND drp.wait_type = 'e_waitPipeNewRow' ORDER BY drp.event_date) AS cao
 			 CROSS APPLY (SELECT TOP 1 * FROM  #deadlock_resource_parallel AS drp WHERE drp.owner_id = dp.id AND drp.wait_type = 'e_waitPipeGetRow' ORDER BY drp.event_date) AS caw
@@ -799,13 +906,31 @@ SET @VersionDate = '20180301';
 		       d.host_name,
 		       d.client_app,
 		       d.wait_time,
+		       d.priority,
 			   d.log_used,
 		       d.last_tran_started,
 		       d.last_batch_started,
 		       d.last_batch_completed,
-		       d.transaction_name
+		       d.transaction_name,
+			   /*These columns will be NULL for regular (non-parallel) deadlocks*/
+			   d.owner_mode,
+			   d.owner_waiter_type,
+			   d.owner_activity,
+			   d.owner_waiter_activity,
+			   d.owner_merging,
+			   d.owner_spilling,
+			   d.owner_waiting_to_close,
+			   d.waiter_mode,
+			   d.waiter_waiter_type,
+			   d.waiter_owner_activity,
+			   d.waiter_waiter_activity,
+			   d.waiter_merging,
+			   d.waiter_spilling,
+			   d.waiter_waiting_to_close,
+			   d.deadlock_graph
 		FROM   deadlocks AS d
 		WHERE  d.dn = 1
+		AND en < CASE WHEN d.deadlock_type = N'Parallel Deadlock' THEN 2 ELSE 2147483647 END 
 		AND (DB_NAME(d.database_id) = @DatabaseName OR @DatabaseName IS NULL)
 		AND (d.event_date >= @StartDate OR @StartDate IS NULL)
 		AND (d.event_date < @EndDate OR @EndDate IS NULL)

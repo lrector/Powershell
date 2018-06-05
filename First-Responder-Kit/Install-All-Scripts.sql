@@ -28,8 +28,8 @@ SET NOCOUNT ON;
 BEGIN;
 
 DECLARE @Version VARCHAR(30);
-SET @Version = '2.3';
-SET @VersionDate = '20180301';
+SET @Version = '2.5';
+SET @VersionDate = '20180501';
 
 IF @Help = 1
 
@@ -1513,8 +1513,8 @@ SET NOCOUNT ON;
 BEGIN;
 
 DECLARE @Version VARCHAR(30);
-SET @Version = '2.3';
-SET @VersionDate = '20180301';;
+SET @Version = '2.5';
+SET @VersionDate = '20180501';;
 
 
 IF @Help = 1
@@ -2829,8 +2829,8 @@ AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	DECLARE @Version VARCHAR(30);
-	SET @Version = '6.3';
-	SET @VersionDate = '20180301';
+	SET @Version = '6.5';
+	SET @VersionDate = '20180501';
 	SET @OutputType = UPPER(@OutputType);
 
 	IF @Help = 1 PRINT '
@@ -2938,10 +2938,19 @@ AS
 			,@ColumnStoreIndexesInUse bit
 			,@TraceFileIssue bit
 			-- Flag for Windows OS to help with Linux support
-			,@IsWindowsOperatingSystem BIT;
+			,@IsWindowsOperatingSystem BIT
+			,@DaysUptime NUMERIC(23,2);
 
 		SET @crlf = NCHAR(13) + NCHAR(10);
 		SET @ResultText = 'sp_Blitz Results: ' + @crlf;
+
+		/* Last startup */
+		SELECT @DaysUptime = CAST(DATEDIFF(HOUR, create_date, GETDATE()) / 24. AS NUMERIC(23, 2))
+		FROM   sys.databases
+		WHERE  database_id = 2;
+		
+		IF @DaysUptime = 0
+		    SET @DaysUptime = .01;
 		
 		/*
 		--TOURSTOP01--
@@ -3121,6 +3130,15 @@ AS
 						INSERT INTO #SkipChecks (CheckID) VALUES (73); /* Failsafe operator */
 						INSERT INTO #SkipChecks (CheckID) VALUES (96); /* Agent alerts for corruption */
 			END; /* Express Edition skipped checks */
+
+		/* If the server is an Azure Managed Instance, skip checks that it doesn't allow */
+		IF SERVERPROPERTY('EngineEdition') = 8
+			BEGIN
+						INSERT INTO #SkipChecks (CheckID) VALUES (1);  /* Full backups - because of the MI GUID name bug mentioned here: https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit/issues/1481 */
+						INSERT INTO #SkipChecks (CheckID) VALUES (2);  /* Log backups - because of the MI GUID name bug mentioned here: https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit/issues/1481 */
+						INSERT INTO #SkipChecks (CheckID) VALUES (100);  /* Remote DAC disabled - but it's working anyway, details here: https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit/issues/1481 */
+						INSERT INTO #SkipChecks (CheckID) VALUES (199);  /* Default trace, details here: https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit/issues/1481 */
+            END; /* Azure Managed Instance skipped checks */
 
 		/*
 		That's the end of the SkipChecks stuff.
@@ -3344,6 +3362,11 @@ AS
 		INSERT INTO #IgnorableWaits VALUES ('LAZYWRITER_SLEEP');
 		INSERT INTO #IgnorableWaits VALUES ('LOGMGR_QUEUE');
 		INSERT INTO #IgnorableWaits VALUES ('ONDEMAND_TASK_QUEUE');
+		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_DRAIN_WORKER');
+		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_LOG_CACHE');
+		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_TRAN_LIST');
+		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_WORKER_SYNC');
+		INSERT INTO #IgnorableWaits VALUES ('PARALLEL_REDO_WORKER_WAIT_WORK');
 		INSERT INTO #IgnorableWaits VALUES ('PREEMPTIVE_HADR_LEASE_MECHANISM');
 		INSERT INTO #IgnorableWaits VALUES ('PREEMPTIVE_SP_SERVER_DIAGNOSTICS');
 		INSERT INTO #IgnorableWaits VALUES ('QDS_ASYNC_QUEUE');
@@ -3391,7 +3414,9 @@ AS
 								'Wait Stats',
 								'Wait Stats Have Been Cleared',
 								'https://BrentOzar.com/go/waits',
-								'Someone ran DBCC SQLPERF to clear sys.dm_os_wait_stats at approximately: ' + CONVERT(NVARCHAR(100), DATEADD(ms, (-1 * @MsSinceWaitsCleared), GETDATE()), 120));
+								'Someone ran DBCC SQLPERF to clear sys.dm_os_wait_stats at approximately: ' 
+									+ CONVERT(NVARCHAR(100), 
+										DATEADD(MINUTE, (-1. * (@MsSinceWaitsCleared) / 1000. / 60.), GETDATE()), 120));
 			END;
 
 		/* @CpuMsSinceWaitsCleared is used for waits stats calculations */
@@ -3481,42 +3506,87 @@ AS
 
 						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 1) WITH NOWAIT;
 
-						INSERT  INTO #BlitzResults
-								( CheckID ,
-								  DatabaseName ,
-								  Priority ,
-								  FindingsGroup ,
-								  Finding ,
-								  URL ,
-								  Details
-								)
-								SELECT  1 AS CheckID ,
-										d.[name] AS DatabaseName ,
-										1 AS Priority ,
-										'Backup' AS FindingsGroup ,
-										'Backups Not Performed Recently' AS Finding ,
-										'https://BrentOzar.com/go/nobak' AS URL ,
-										'Last backed up: '
-										+ COALESCE(CAST(MAX(b.backup_finish_date) AS VARCHAR(25)),'never') AS Details
-								FROM    master.sys.databases d
-										LEFT OUTER JOIN msdb.dbo.backupset b ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = b.database_name COLLATE SQL_Latin1_General_CP1_CI_AS
-																  AND b.type = 'D'
-																  AND b.server_name = SERVERPROPERTY('ServerName') /*Backupset ran on current server */
-								WHERE   d.database_id <> 2  /* Bonus points if you know what that means */
-										AND d.state NOT IN(1, 6, 10) /* Not currently offline or restoring, like log shipping databases */
-										AND d.is_in_standby = 0 /* Not a log shipping target database */
-										AND d.source_database_id IS NULL /* Excludes database snapshots */
-										AND d.name NOT IN ( SELECT DISTINCT
-																  DatabaseName
-															FROM  #SkipChecks
-															WHERE CheckID IS NULL OR CheckID = 1)
-										/*
-										The above NOT IN filters out the databases we're not supposed to check.
-										*/
-								GROUP BY d.name
-								HAVING  MAX(b.backup_finish_date) <= DATEADD(dd,
-																  -7, GETDATE())
-                                        OR MAX(b.backup_finish_date) IS NULL;
+                        IF SERVERPROPERTY('EngineName') <> 8 /* Azure Managed Instances need a special query */
+                            BEGIN
+						    INSERT  INTO #BlitzResults
+								    ( CheckID ,
+								      DatabaseName ,
+								      Priority ,
+								      FindingsGroup ,
+								      Finding ,
+								      URL ,
+								      Details
+								    )
+								    SELECT  1 AS CheckID ,
+										    d.[name] AS DatabaseName ,
+										    1 AS Priority ,
+										    'Backup' AS FindingsGroup ,
+										    'Backups Not Performed Recently' AS Finding ,
+										    'https://BrentOzar.com/go/nobak' AS URL ,
+										    'Last backed up: '
+										    + COALESCE(CAST(MAX(b.backup_finish_date) AS VARCHAR(25)),'never') AS Details
+								    FROM    master.sys.databases d
+										    LEFT OUTER JOIN msdb.dbo.backupset b ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = b.database_name COLLATE SQL_Latin1_General_CP1_CI_AS
+																      AND b.type = 'D'
+																      AND b.server_name = SERVERPROPERTY('ServerName') /*Backupset ran on current server  */
+								    WHERE   d.database_id <> 2  /* Bonus points if you know what that means */
+										    AND d.state NOT IN(1, 6, 10) /* Not currently offline or restoring, like log shipping databases */
+										    AND d.is_in_standby = 0 /* Not a log shipping target database */
+										    AND d.source_database_id IS NULL /* Excludes database snapshots */
+										    AND d.name NOT IN ( SELECT DISTINCT
+																      DatabaseName
+															    FROM  #SkipChecks
+															    WHERE CheckID IS NULL OR CheckID = 1)
+										    /*
+										    The above NOT IN filters out the databases we're not supposed to check.
+										    */
+								    GROUP BY d.name
+								    HAVING  MAX(b.backup_finish_date) <= DATEADD(dd,
+																      -7, GETDATE())
+                                            OR MAX(b.backup_finish_date) IS NULL;
+                                END;
+
+                        ELSE /* SERVERPROPERTY('EngineName') must be 8, Azure Managed Instances */
+                            BEGIN
+						    INSERT  INTO #BlitzResults
+								    ( CheckID ,
+								      DatabaseName ,
+								      Priority ,
+								      FindingsGroup ,
+								      Finding ,
+								      URL ,
+								      Details
+								    )
+								    SELECT  1 AS CheckID ,
+										    d.[name] AS DatabaseName ,
+										    1 AS Priority ,
+										    'Backup' AS FindingsGroup ,
+										    'Backups Not Performed Recently' AS Finding ,
+										    'https://BrentOzar.com/go/nobak' AS URL ,
+										    'Last backed up: '
+										    + COALESCE(CAST(MAX(b.backup_finish_date) AS VARCHAR(25)),'never') AS Details
+								    FROM    master.sys.databases d
+										    LEFT OUTER JOIN msdb.dbo.backupset b ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = b.database_name COLLATE SQL_Latin1_General_CP1_CI_AS
+																      AND b.type = 'D'
+								    WHERE   d.database_id <> 2  /* Bonus points if you know what that means */
+										    AND d.state NOT IN(1, 6, 10) /* Not currently offline or restoring, like log shipping databases */
+										    AND d.is_in_standby = 0 /* Not a log shipping target database */
+										    AND d.source_database_id IS NULL /* Excludes database snapshots */
+										    AND d.name NOT IN ( SELECT DISTINCT
+																      DatabaseName
+															    FROM  #SkipChecks
+															    WHERE CheckID IS NULL OR CheckID = 1)
+										    /*
+										    The above NOT IN filters out the databases we're not supposed to check.
+										    */
+								    GROUP BY d.name
+								    HAVING  MAX(b.backup_finish_date) <= DATEADD(dd,
+																      -7, GETDATE())
+                                            OR MAX(b.backup_finish_date) IS NULL;
+                                END;
+
+
+
 						/*
 						And there you have it. The rest of this stored procedure works the same
 						way: it asks:
@@ -3659,7 +3729,8 @@ AS
 																  -14, GETDATE()) )
 										/* Filter out databases that were recently restored: */
 										LEFT OUTER JOIN msdb.dbo.restorehistory rh ON bs.database_name = rh.destination_database_name AND rh.restore_date > DATEADD(dd, -14, GETDATE())
-								WHERE   UPPER(LEFT(bmf.physical_device_name COLLATE SQL_Latin1_General_CP1_CI_AS, 3)) IN (
+								WHERE   UPPER(LEFT(bmf.physical_device_name, 3)) <> 'HTT' AND
+                                        UPPER(LEFT(bmf.physical_device_name COLLATE SQL_Latin1_General_CP1_CI_AS, 3)) IN (
 										SELECT DISTINCT
 												UPPER(LEFT(mf.physical_name COLLATE SQL_Latin1_General_CP1_CI_AS, 3))
 										FROM    sys.master_files AS mf )
@@ -4653,6 +4724,7 @@ AS
 				IF NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 25 )
+                    AND SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */
 					BEGIN
 						
 						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 25) WITH NOWAIT;
@@ -4685,6 +4757,7 @@ AS
 				IF NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 26 )
+                    AND SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */
 					BEGIN
 						
 						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 26) WITH NOWAIT;
@@ -5067,7 +5140,7 @@ AS
 		  ''Corruption'' AS FindingsGroup ,
 		  ''Database Corruption Detected'' AS Finding ,
 		  ''https://BrentOzar.com/go/repair'' AS URL ,
-		  ( ''AlwaysOn has automatically repaired at least one corrupt page in the last 30 days. For more information, query the DMV sys.dm_hadr_auto_page_repair.'' ) AS Details
+		  ( ''Availability Groups has automatically repaired at least one corrupt page in the last 30 days. For more information, query the DMV sys.dm_hadr_auto_page_repair.'' ) AS Details
 		  FROM    sys.dm_hadr_auto_page_repair rp
 		  INNER JOIN master.sys.databases db ON rp.database_id = db.database_id
 		  WHERE   rp.modification_time >= DATEADD(dd, -30, GETDATE()) OPTION (RECOMPILE) ;';
@@ -5570,6 +5643,7 @@ AS
 				IF NOT EXISTS ( SELECT  1
 								FROM    #SkipChecks
 								WHERE   DatabaseName IS NULL AND CheckID = 154 )
+                    AND SERVERPROPERTY('EngineEdition') <> 8
 					BEGIN
 
 						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 154) WITH NOWAIT;
@@ -5860,35 +5934,6 @@ AS
 									AND SUM([wait_time_ms]) > 60000;
 						END;
 
-					IF @ProductVersionMajor >= 11 AND NOT EXISTS ( SELECT 1
-										 FROM   #SkipChecks
-										 WHERE  DatabaseName IS NULL AND CheckID = 162 )
-						BEGIN
-							
-							IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 162) WITH NOWAIT;
-
-							INSERT  INTO #BlitzResults
-									( CheckID ,
-									  Priority ,
-									  FindingsGroup ,
-									  Finding ,
-									  URL ,
-									  Details
-									)
-									SELECT  162 AS CheckID ,
-											50 AS Priority ,
-											'Performance' AS FindingGroup ,
-											'Poison Wait Detected: CMEMTHREAD & NUMA'  AS Finding ,
-											'https://BrentOzar.com/go/poison' AS URL ,
-											CONVERT(VARCHAR(10), (SUM([wait_time_ms]) / 1000) / 86400) + ':' + CONVERT(VARCHAR(20), DATEADD(s, (SUM([wait_time_ms]) / 1000), 0), 108) + ' of this wait have been recorded. In servers with over 8 cores per NUMA node, when CMEMTHREAD waits are a bottleneck, trace flag 8048 may be needed.'
-									FROM sys.dm_os_nodes n
-									INNER JOIN sys.[dm_os_wait_stats] w ON w.wait_type = 'CMEMTHREAD'
-									WHERE n.node_id = 0 AND n.online_scheduler_count >= 8
-										AND EXISTS (SELECT * FROM sys.dm_os_nodes WHERE node_id > 0 AND node_state_desc NOT LIKE '%DAC')
-									GROUP BY w.wait_type
-								    HAVING SUM([wait_time_ms]) > (SELECT 5000 * datediff(HH,create_date,CURRENT_TIMESTAMP) AS hours_since_startup FROM sys.databases WHERE name='tempdb')
-									AND SUM([wait_time_ms]) > 60000;
-						END;
 
 						IF NOT EXISTS ( SELECT 1
 										 FROM   #SkipChecks
@@ -6029,8 +6074,12 @@ AS
 									Finding,
 									URL,
 									Details)
-								SELECT 124, 150, 'Performance', 'Deadlocks Happening Daily', 'https://BrentOzar.com/go/deadlocks',
-									CAST(p.cntr_value AS NVARCHAR(100)) + ' deadlocks recorded since startup. To find them, run sp_BlitzLock.' AS Details
+								SELECT 124, 
+										150, 
+										'Performance', 
+										'Deadlocks Happening Daily', 
+										'https://BrentOzar.com/go/deadlocks',
+										CAST(CAST(p.cntr_value / @DaysUptime AS BIGINT) AS NVARCHAR(100)) + ' average deadlocks per day. To find them, run sp_BlitzLock.' AS Details
 								FROM sys.dm_os_performance_counters p
 									INNER JOIN sys.databases d ON d.name = 'tempdb'
 								WHERE RTRIM(p.counter_name) = 'Number of Deadlocks/sec'
@@ -6082,6 +6131,7 @@ AS
 						IF NOT EXISTS ( SELECT  1
 										FROM    #SkipChecks
 										WHERE   DatabaseName IS NULL AND CheckID = 128 )
+                            AND SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */
 							BEGIN
 
 							IF (@ProductVersionMajor = 14 AND @ProductVersionMinor < 1000) OR
@@ -6109,6 +6159,7 @@ AS
 						IF NOT EXISTS ( SELECT  1
 										FROM    #SkipChecks
 										WHERE   DatabaseName IS NULL AND CheckID = 129 )
+                            AND SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */
 							BEGIN
 							IF (@ProductVersionMajor = 11 AND @ProductVersionMinor >= 3000 AND @ProductVersionMinor <= 3436) OR
 							   (@ProductVersionMajor = 11 AND @ProductVersionMinor = 5058) OR
@@ -6128,6 +6179,7 @@ AS
 						IF NOT EXISTS ( SELECT  1
 										FROM    #SkipChecks
 										WHERE   DatabaseName IS NULL AND CheckID = 157 )
+                            AND SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */
 							BEGIN
 							IF (@ProductVersionMajor = 10 AND @ProductVersionMinor >= 5500 AND @ProductVersionMinor <= 5512) OR
 							   (@ProductVersionMajor = 10 AND @ProductVersionMinor >= 5750 AND @ProductVersionMinor <= 5867) OR
@@ -6152,6 +6204,7 @@ AS
 						IF NOT EXISTS ( SELECT  1
 										FROM    #SkipChecks
 										WHERE   DatabaseName IS NULL AND CheckID = 189 )
+                            AND SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */
 							BEGIN
 							IF (@ProductVersionMajor = 13 AND @ProductVersionMinor < 4001 AND @@VERSION LIKE '%Standard Edition%')
 								BEGIN
@@ -6164,6 +6217,24 @@ AS
 								END;
 
 							END;						
+                        
+                        /* Check if SQL 2017 but not CU3 */
+						IF NOT EXISTS ( SELECT  1
+										FROM    #SkipChecks
+										WHERE   DatabaseName IS NULL AND CheckID = 216 )
+                            AND SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */
+							BEGIN
+							IF (@ProductVersionMajor = 14 AND @ProductVersionMinor < 3015)
+								BEGIN
+								
+								IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 216) WITH NOWAIT;
+								
+								INSERT INTO #BlitzResults(CheckID, Priority, FindingsGroup, Finding, URL, Details)
+									VALUES(216, 100, 'Features', 'Missing Features', 'https://support.microsoft.com/en-us/help/4041814',
+										'SQL 2017 is being used but not Cumulative Update 3. We''d recommend patching to take advantage of increased analytics when running BlitzCache.');
+								END;
+
+							END;		
 
                         /* Performance - High Memory Use for In-Memory OLTP (Hekaton) */
                         IF NOT EXISTS ( SELECT  1
@@ -7012,7 +7083,12 @@ IF @ProductVersionMajor >= 10
 													'Hey big spender, you have ' + CAST(COUNT_BIG(*) AS VARCHAR(30)) + ' Extended Events sessions running. You sure you meant to do that?' AS Details
 											    FROM sys.dm_xe_sessions
 												WHERE [name] NOT IN
-												( 'AlwaysOn_health', 'system_health', 'telemetry_xevents', 'sp_server_diagnostics', 'hkenginexesession' )
+												( 'AlwaysOn_health', 
+												  'system_health', 
+												  'telemetry_xevents', 
+												  'sp_server_diagnostics', 
+												  'sp_server_diagnostics session', 
+												  'hkenginexesession' )
 												AND name NOT LIKE '%$A%'
 											  HAVING COUNT_BIG(*) >= 2;
 								END;	
@@ -7292,6 +7368,14 @@ IF @ProductVersionMajor >= 10
 		         WHERE  is_online = 1
 		                AND scheduler_id < 255
 		                AND parent_node_id < 64
+						AND EXISTS (
+									SELECT 1
+									FROM ( SELECT    memory_node_id, SUM(online_scheduler_count) AS schedulers
+									       FROM      sys.dm_os_nodes
+									       WHERE     memory_node_id < 64
+									       GROUP  BY memory_node_id ) AS nodes
+										   HAVING MIN(nodes.schedulers) <> MAX(nodes.schedulers)
+									)
 		         GROUP BY parent_node_id,
 		                is_online
 		         HAVING ( COUNT(cpu_id) + 2 ) % 2 = 1;
@@ -7350,7 +7434,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 199) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 203) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -7374,6 +7458,7 @@ IF @ProductVersionMajor >= 10
 			   command they're trying to run. See Github issues 1062, 1074, 1075.
 			*/
 			WHERE d.dbcc_event_full_upper NOT LIKE '%DBCC%ADDINSTANCE%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%AUTOPILOT%'
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKALLOC%'
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKCATALOG%'
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%CHECKCONSTRAINTS%'
@@ -7397,11 +7482,13 @@ IF @ProductVersionMajor >= 10
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%TRACEON%'
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%TRACEOFF%'
 			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%TRACESTATUS%'
+			AND d.dbcc_event_full_upper NOT LIKE '%DBCC%USEROPTIONS%'
 			AND d.application_name NOT LIKE 'Critical Care(R) Collector'
 			AND d.application_name NOT LIKE '%Red Gate Software Ltd SQL Prompt%'
 			AND d.application_name NOT LIKE '%Spotlight Diagnostic Server%'
 			AND d.application_name NOT LIKE '%SQL Diagnostic Manager%'
 			AND d.application_name NOT LIKE '%Sentry%'
+			AND d.application_name NOT LIKE '%LiteSpeed%'
 			
 
 			HAVING COUNT(*) > 0;
@@ -7415,7 +7502,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 200) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 207) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -7446,7 +7533,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 201) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 208) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -7477,7 +7564,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 202) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 205) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -7508,7 +7595,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 203) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 209) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -7538,7 +7625,7 @@ IF @ProductVersionMajor >= 10
 							AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 204) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 210) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -7573,7 +7660,7 @@ IF @ProductVersionMajor >= 10
 						AND @TraceFileIssue = 0
 					BEGIN
 						
-						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 205) WITH NOWAIT
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 206) WITH NOWAIT
 						
 						  INSERT    INTO [#BlitzResults]
 									( [CheckID] ,
@@ -7601,6 +7688,95 @@ IF @ProductVersionMajor >= 10
 						HAVING AVG(DATEDIFF(SECOND, t.StartTime, t.EndTime)) > 5;
 				
 				END;
+
+			IF NOT EXISTS ( SELECT  1
+								FROM    #SkipChecks
+								WHERE   DatabaseName IS NULL AND CheckID = 215 )
+						AND @TraceFileIssue = 0
+                        AND EXISTS (SELECT * FROM sys.all_columns WHERE name = 'database_id' AND object_id = OBJECT_ID('sys.dm_exec_sessions'))
+					BEGIN
+						
+						  IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 215) WITH NOWAIT
+						
+						  SET @StringToExecute = 'INSERT    INTO [#BlitzResults]
+									( [CheckID] ,
+									  [Priority] ,
+									  [FindingsGroup] ,
+									  [Finding] ,
+                                      [DatabaseName] ,
+									  [URL] ,
+									  [Details] )
+
+								SELECT	215 AS CheckID ,
+										100 AS Priority ,
+										''Performance'' AS FindingsGroup ,
+										''Implicit Transactions'' AS Finding ,
+										DB_NAME(s.database_id) AS DatabaseName,
+										''https://www.brentozar.com/go/ImplicitTransactions/'' AS URL ,
+										N''The database '' +
+										DB_NAME(s.database_id)
+										+ '' has ''
+										+ CONVERT(NVARCHAR(20), COUNT_BIG(*))
+										+ '' open implicit transactions ''
+										+ '' with an oldest begin time of ''
+										+ CONVERT(NVARCHAR(30), MIN(tat.transaction_begin_time)) AS details
+								FROM    sys.dm_tran_active_transactions AS tat
+								LEFT JOIN sys.dm_tran_session_transactions AS tst
+								ON tst.transaction_id = tat.transaction_id
+								LEFT JOIN sys.dm_exec_sessions AS s
+								ON s.session_id = tst.session_id
+								WHERE tat.name = ''implicit_transaction''
+								GROUP BY DB_NAME(s.database_id), transaction_type, transaction_state;';
+
+
+							IF @Debug = 2 AND @StringToExecute IS NOT NULL PRINT @StringToExecute;
+							IF @Debug = 2 AND @StringToExecute IS NULL PRINT '@StringToExecute has gone NULL, for some reason.';
+								
+							EXECUTE(@StringToExecute);
+
+
+				
+				END;
+
+						
+				IF NOT EXISTS ( SELECT  1
+								FROM    #SkipChecks
+								WHERE   DatabaseName IS NULL AND CheckID = 216 )
+					BEGIN
+						
+						IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 216) WITH NOWAIT;
+						
+							WITH reboot_airhorn
+							    AS
+							     (
+							         SELECT create_date
+							         FROM   sys.databases
+							         WHERE  database_id = 2
+							         UNION ALL
+							         SELECT CAST(DATEADD(SECOND, ( ms_ticks / 1000 ) * ( -1 ), GETDATE()) AS DATETIME)
+							         FROM   sys.dm_os_sys_info
+							     )
+							INSERT  INTO #BlitzResults
+									( CheckID ,
+									  Priority ,
+									  FindingsGroup ,
+									  Finding ,
+									  URL ,
+									  Details
+									)														
+							SELECT 216 AS CheckID,
+							       10 AS Priority,
+							       'Recent Restart' AS FindingsGroup,
+							       'Server restarted in last 24 hours' AS Finding,
+							       '' AS URL,
+							       'Surprise! Your server was last restarted on: ' + CONVERT(VARCHAR(30), MAX(reboot_airhorn.create_date)) AS details
+							FROM   reboot_airhorn
+							HAVING MAX(reboot_airhorn.create_date) >= DATEADD(HOUR, -24, GETDATE());						
+						
+
+					END;
+
+
 
 				IF @CheckUserDatabaseObjects = 1
 					BEGIN
@@ -8191,7 +8367,7 @@ IF @ProductVersionMajor >= 10
 								
 								EXECUTE master.sys.sp_MSforeachdb 'USE [?];
                                     INSERT INTO #Recompile
-                                    SELECT DBName = DB_Name(), SPName = SO.name, SM.is_recompiled, ISR.SPECIFIC_SCHEMA
+                                    SELECT DISTINCT DBName = DB_Name(), SPName = SO.name, SM.is_recompiled, ISR.SPECIFIC_SCHEMA
                                     FROM sys.sql_modules AS SM
                                     LEFT OUTER JOIN master.sys.databases AS sDB ON SM.object_id = DB_id()
                                     LEFT OUTER JOIN dbo.sysobjects AS SO ON SM.object_id = SO.id and type = ''P''
@@ -8337,7 +8513,7 @@ IF @ProductVersionMajor >= 10
 								
 								IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 122) WITH NOWAIT;
 								
-								/* SQL Server 2012 and newer uses temporary stats for AlwaysOn Availability Groups, and those show up as user-created */
+								/* SQL Server 2012 and newer uses temporary stats for Availability Groups, and those show up as user-created */
 								IF EXISTS (SELECT *
 									  FROM sys.all_columns c
 									  INNER JOIN sys.all_objects o ON c.object_id = o.object_id
@@ -8957,7 +9133,9 @@ IF @ProductVersionMajor >= 10
 												Value ,
 												DbName
 									   FROM     #DBCCs
+                                       INNER JOIN sys.databases d ON #DBCCs.DbName = d.name
 									   WHERE    Field = 'dbi_dbccLastKnownGood'
+                                         AND d.create_date < DATEADD(dd, -14, GETDATE())
 									 )
 							INSERT  INTO #BlitzResults
 									( CheckID ,
@@ -9119,14 +9297,14 @@ IF @ProductVersionMajor >= 10
 										CASE WHEN [T].[TraceFlag] = '834'  AND @ColumnStoreIndexesInUse = 1 THEN 'https://support.microsoft.com/en-us/kb/3210239'
 											 ELSE'https://www.BrentOzar.com/go/traceflags/' END AS URL ,
 										'Trace flag ' +
-										CASE WHEN [T].[TraceFlag] = '2330' THEN ' 2330 enabled globally. Using this trace Flag disables missing index requests'
+										CASE WHEN [T].[TraceFlag] = '2330' THEN ' 2330 enabled globally. Using this trace Flag disables missing index requests!'
 											 WHEN [T].[TraceFlag] = '1211' THEN ' 1211 enabled globally. Using this Trace Flag disables lock escalation when you least expect it. No Bueno!'
 											 WHEN [T].[TraceFlag] = '1224' THEN ' 1224 enabled globally. Using this Trace Flag disables lock escalation based on the number of locks being taken. You shouldn''t have done that, Dave.'
 											 WHEN [T].[TraceFlag] = '652'  THEN ' 652 enabled globally. Using this Trace Flag disables pre-fetching during index scans. If you hate slow queries, you should turn that off.'
 											 WHEN [T].[TraceFlag] = '661'  THEN ' 661 enabled globally. Using this Trace Flag disables ghost record removal. Who you gonna call? No one, turn that thing off.'
-											 WHEN [T].[TraceFlag] = '1806'  THEN ' 1806 enabled globally. Using this Trace Flag disables instant file initialization. I question your sanity.'
+											 WHEN [T].[TraceFlag] = '1806'  THEN ' 1806 enabled globally. Using this Trace Flag disables Instant File Initialization. I question your sanity.'
 											 WHEN [T].[TraceFlag] = '3505'  THEN ' 3505 enabled globally. Using this Trace Flag disables Checkpoints. Probably not the wisest idea.'
-											 WHEN [T].[TraceFlag] = '8649'  THEN ' 8649 enabled globally. Using this Trace Flag drops cost thresholf for parallelism down to 0. I hope this is a dev server.'
+											 WHEN [T].[TraceFlag] = '8649'  THEN ' 8649 enabled globally. Using this Trace Flag drops cost threshold for parallelism down to 0. I hope this is a dev server.'
 										     WHEN [T].[TraceFlag] = '834' AND @ColumnStoreIndexesInUse = 1 THEN ' 834 is enabled globally. Using this Trace Flag with Columnstore Indexes is not a great idea.'
 											 WHEN [T].[TraceFlag] = '8017' AND (CAST(SERVERPROPERTY('Edition') AS NVARCHAR(1000)) LIKE N'%Express%') THEN ' 8017 is enabled globally, which is the default for express edition.'
                                              WHEN [T].[TraceFlag] = '8017' AND (CAST(SERVERPROPERTY('Edition') AS NVARCHAR(1000)) NOT LIKE N'%Express%') THEN ' 8017 is enabled globally. Using this Trace Flag disables creation schedulers for all logical processors. Not good.'
@@ -9134,6 +9312,45 @@ IF @ProductVersionMajor >= 10
 										AS Details
 								FROM    #TraceStatus T;
 					END;
+
+            /* High CMEMTHREAD waits that could need trace flag 8048.
+               This check has to be run AFTER the globally enabled trace flag check,
+               since it uses the #TraceStatus table to know if flags are enabled.
+            */
+			IF @ProductVersionMajor >= 11 AND NOT EXISTS ( SELECT 1
+									FROM   #SkipChecks
+									WHERE  DatabaseName IS NULL AND CheckID = 162 )
+				BEGIN
+							
+					IF @Debug IN (1, 2) RAISERROR('Running CheckId [%d].', 0, 1, 162) WITH NOWAIT;
+
+					INSERT  INTO #BlitzResults
+							( CheckID ,
+								Priority ,
+								FindingsGroup ,
+								Finding ,
+								URL ,
+								Details
+							)
+							SELECT  162 AS CheckID ,
+									50 AS Priority ,
+									'Performance' AS FindingGroup ,
+									'Poison Wait Detected: CMEMTHREAD & NUMA'  AS Finding ,
+									'https://BrentOzar.com/go/poison' AS URL ,
+                                    CONVERT(VARCHAR(10), (MAX([wait_time_ms]) / 1000) / 86400) + ':' + CONVERT(VARCHAR(20), DATEADD(s, (MAX([wait_time_ms]) / 1000), 0), 108) + ' of this wait have been recorded'
+                                    + CASE WHEN ts.status = 1 THEN ' despite enabling trace flag 8048 already.'
+                                        ELSE '. In servers with over 8 cores per NUMA node, when CMEMTHREAD waits are a bottleneck, trace flag 8048 may be needed.'
+                                    END
+							FROM sys.dm_os_nodes n
+							INNER JOIN sys.[dm_os_wait_stats] w ON w.wait_type = 'CMEMTHREAD'
+                            LEFT OUTER JOIN #TraceStatus ts ON ts.TraceFlag = 8048 AND ts.status = 1
+							WHERE n.node_id = 0 AND n.online_scheduler_count >= 8
+								AND EXISTS (SELECT * FROM sys.dm_os_nodes WHERE node_id > 0 AND node_state_desc NOT LIKE '%DAC')
+							GROUP BY w.wait_type, ts.status
+							HAVING SUM([wait_time_ms]) > (SELECT 5000 * datediff(HH,create_date,CURRENT_TIMESTAMP) AS hours_since_startup FROM sys.databases WHERE name='tempdb')
+							AND SUM([wait_time_ms]) > 60000;
+				END;
+
 
 		/*Check for transaction log file larger than data file */
 				IF NOT EXISTS ( SELECT  1
@@ -9472,9 +9689,9 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 							'https://BrentOzar.com/go/lpim' AS [URL] ,
 							( 'You currently have '
 							  + CASE WHEN [dopm].[locked_page_allocations_kb] / 1024. / 1024. > 0
-									 THEN CAST([dopm].[locked_page_allocations_kb] / 1024. / 1024. AS VARCHAR(100))
+									 THEN CAST([dopm].[locked_page_allocations_kb] / 1024 / 1024 AS VARCHAR(100))
 										  + ' GB'
-									 ELSE CAST([dopm].[locked_page_allocations_kb] / 1024. AS VARCHAR(100))
+									 ELSE CAST([dopm].[locked_page_allocations_kb] / 1024 AS VARCHAR(100))
 										  + ' MB'
 								END + ' of pages locked in memory.' ) AS [Details]
 						  FROM
@@ -9704,12 +9921,17 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 												+ CAST(SERVERPROPERTY('productversion') AS NVARCHAR(100))
 												+ N'. Patch Level: '
 												+ CAST(SERVERPROPERTY('productlevel') AS NVARCHAR(100))
+								  				+ CASE WHEN SERVERPROPERTY('ProductUpdateLevel') IS NULL
+												       THEN N''
+												       ELSE N'. Cumulative Update: '
+													   + CAST(SERVERPROPERTY('ProductUpdateLevel') AS NVARCHAR(100))
+												END
 												+ N'. Edition: '
 												+ CAST(SERVERPROPERTY('edition') AS VARCHAR(100))
-												+ N'. AlwaysOn Enabled: '
+												+ N'. Availability Groups Enabled: '
 												+ CAST(COALESCE(SERVERPROPERTY('IsHadrEnabled'),
 																0) AS VARCHAR(100))
-												+ N'. AlwaysOn Mgr Status: '
+												+ N'. Availability Groups Manager Status: '
 												+ CAST(COALESCE(SERVERPROPERTY('HadrManagerStatus'),
 																0) AS VARCHAR(100));
 							END;
@@ -9905,6 +10127,16 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 								                           @value_name = 'ActivePowerScheme',
 								                           @value = @outval OUTPUT;
 
+								DECLARE @cpu_speed_mhz int,
+								        @cpu_speed_ghz decimal(18,2);
+								
+								EXEC master.sys.xp_regread @rootkey = 'HKEY_LOCAL_MACHINE',
+								                           @key = 'HARDWARE\DESCRIPTION\System\CentralProcessor\0',
+								                           @value_name = '~MHz',
+								                           @value = @cpu_speed_mhz OUTPUT;
+								
+								SELECT @cpu_speed_ghz = CAST(CAST(@cpu_speed_mhz AS DECIMAL) / 1000 AS DECIMAL(18,2));
+
 									INSERT  INTO #BlitzResults
 										( CheckID ,
 										  Priority ,
@@ -9918,7 +10150,9 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 									'Server Info' AS FindingsGroup,
 									'Power Plan' AS Finding,
 									'https://www.brentozar.com/blitz/power-mode/' AS URL,
-									'Your server is in '
+									'Your server has '
+									+ CAST(@cpu_speed_ghz as VARCHAR(4))
+									+ 'GHz CPUs, and is in '
 									+ CASE @outval
 							             WHEN 'a1841308-3541-4fab-bc81-f71556f20b4a'
 							             THEN 'power saving mode -- are you sure this is a production SQL Server?'
@@ -9926,7 +10160,7 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 							             THEN 'balanced power mode -- Uh... you want your CPUs to run at full speed, right?'
 							             WHEN '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
 							             THEN 'high performance power mode'
-										 ELSE 'Unknown!'
+										 ELSE 'an unknown power mode.'
 							        END AS Details
 								
 								END;
@@ -10033,7 +10267,7 @@ IF @ProductVersionMajor >= 10 AND  NOT EXISTS ( SELECT  1
 													,240 AS Priority
 													,'Wait Stats' AS FindingsGroup
 													, CAST(ROW_NUMBER() OVER(ORDER BY os.wait_time_ms DESC) AS NVARCHAR(10)) + N' - ' + os.wait_type AS Finding
-													,'https://BrentOzar.com/go/waits' AS URL
+													,'https://www.sqlskills.com/help/waits/' + LOWER(os.wait_type) + '/' AS URL
 													, Details = CAST(CAST(SUM(os.wait_time_ms / 1000.0 / 60 / 60) OVER (PARTITION BY os.wait_type) AS NUMERIC(18,1)) AS NVARCHAR(20)) + N' hours of waits, ' +
 													CAST(CAST((SUM(60.0 * os.wait_time_ms) OVER (PARTITION BY os.wait_type) ) / @MsSinceWaitsCleared  AS NUMERIC(18,1)) AS NVARCHAR(20)) + N' minutes average wait time per hour, ' +
 													/* CAST(CAST(
@@ -10561,8 +10795,8 @@ AS
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	DECLARE @Version VARCHAR(30);
-	SET @Version = '2.3';
-	SET @VersionDate = '20180301';
+	SET @Version = '2.5';
+	SET @VersionDate = '20180501';
 
 	IF @Help = 1 PRINT '
 	/*
@@ -12198,6 +12432,7 @@ CREATE TABLE ##bou_BlitzCacheProcs (
         is_cursor BIT,
 		is_optimistic_cursor BIT,
 		is_forward_only_cursor BIT,
+		is_fast_forward_cursor BIT,
 		is_cursor_dynamic BIT,
         is_parallel BIT,
 		is_forced_serial BIT,
@@ -12325,8 +12560,8 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE @Version VARCHAR(30);
-SET @Version = '6.3';
-SET @VersionDate = '20180301';
+SET @Version = '6.5';
+SET @VersionDate = '20180501';
 
 IF @Help = 1 PRINT '
 sp_BlitzCache from http://FirstResponderKit.org
@@ -12655,7 +12890,7 @@ BEGIN
     UNION ALL
     SELECT N'MaxUsedGrantKB',
            N'BIGINT',
-           N'The maximum used memory grant the query received in kb.'
+           N'The maximum used memory grant the query received in kb.';
 
     SELECT N'MinSpills',
            N'BIGINT',
@@ -12941,6 +13176,7 @@ BEGIN
         is_cursor BIT,
 		is_optimistic_cursor BIT,
 		is_forward_only_cursor BIT,
+        is_fast_forward_cursor BIT,
 		is_cursor_dynamic BIT,
         is_parallel BIT,
 		is_forced_serial BIT,
@@ -13049,7 +13285,7 @@ IF @DurationFilter IS NOT NULL
 
 RAISERROR(N'Checking database validity', 0, 1) WITH NOWAIT;
 SET @DatabaseName = LTRIM(RTRIM(@DatabaseName)) ;
-IF (DB_ID(@DatabaseName)) IS NULL AND @DatabaseName <> ''
+IF (DB_ID(@DatabaseName)) IS NULL AND @DatabaseName <> N''
 BEGIN
    RAISERROR('The database you specified does not exist. Please check the name and try again.', 16, 1);
    RETURN;
@@ -13172,26 +13408,26 @@ IF OBJECT_ID ('tempdb..#trace_flags') IS NOT NULL
     DROP TABLE #trace_flags;
 
 IF OBJECT_ID('tempdb..#variable_info') IS NOT NULL
-    DROP TABLE #variable_info
+    DROP TABLE #variable_info;
 
 IF OBJECT_ID('tempdb..#conversion_info') IS NOT NULL
-    DROP TABLE #conversion_info
+    DROP TABLE #conversion_info;
 
 
 IF OBJECT_ID('tempdb..#missing_index_xml') IS NOT NULL
-    DROP TABLE #missing_index_xml
+    DROP TABLE #missing_index_xml;
 
 IF OBJECT_ID('tempdb..#missing_index_schema') IS NOT NULL
-    DROP TABLE #missing_index_schema
+    DROP TABLE #missing_index_schema;
 
 IF OBJECT_ID('tempdb..#missing_index_usage') IS NOT NULL
-    DROP TABLE #missing_index_usage
+    DROP TABLE #missing_index_usage;
 
 IF OBJECT_ID('tempdb..#missing_index_detail') IS NOT NULL
-    DROP TABLE #missing_index_detail
+    DROP TABLE #missing_index_detail;
 
 IF OBJECT_ID('tempdb..#missing_index_pretty') IS NOT NULL
-    DROP TABLE #missing_index_pretty
+    DROP TABLE #missing_index_pretty;
 
 
 CREATE TABLE #only_query_hashes (
@@ -13252,6 +13488,7 @@ CREATE TABLE #plan_cost
 (
     QueryPlanCost FLOAT,
     SqlHandle VARBINARY(64),
+	PlanHandle VARBINARY(64),
     QueryHash BINARY(8),
     QueryPlanHash BINARY(8)
 );
@@ -13293,8 +13530,9 @@ CREATE TABLE #stored_proc_info
 	converted_column_name NVARCHAR(258),
     compile_time_value NVARCHAR(258),
     proc_name NVARCHAR(1000),
-    column_name NVARCHAR(258),
-    converted_to NVARCHAR(258)
+    column_name NVARCHAR(4000),
+    converted_to NVARCHAR(258),
+	set_options NVARCHAR(1000)
 );
 
 CREATE TABLE #variable_info
@@ -13422,8 +13660,8 @@ CREATE TABLE #missing_index_pretty
 			   + N')' 
 			   + CHAR(10)
 			   + CASE WHEN include IS NOT NULL
-					  THEN N'INCLUDE (' + include + N')'
-					  ELSE N''
+					  THEN N'INCLUDE (' + include + N') WITH (FILLFACTOR=100, ONLINE=?, SORT_IN_TEMPDB=?, DATA_COMPRESSION=?);'
+					  ELSE N' WITH (FILLFACTOR=100, ONLINE=?, SORT_IN_TEMPDB=?, DATA_COMPRESSION=?);'
 				 END
 			   + CHAR(10)
 			   + N'GO'
@@ -13699,7 +13937,9 @@ BEGIN
 END;
 
 IF (@SortOrder IN ('spills', 'avg spills')) 
-AND (@v < 14)
+AND (@v < 13 
+	OR @v = 13 AND @build < 5026
+	OR @v = 14 AND @build < 3015)
 BEGIN
    RAISERROR('Your version of SQL does not support sorting by spills or average spills. Please use another sort order.', 16, 1);
    RETURN;
@@ -13744,10 +13984,10 @@ IF @IgnoreSystemDBs = 1
 	SET @body += N'               AND COALESCE(DB_NAME(CAST(xpa.value AS INT)), '''') NOT IN (''master'', ''model'', ''msdb'', ''tempdb'', ''32767'') AND COALESCE(DB_NAME(CAST(xpa.value AS INT)), '''') NOT IN (SELECT name FROM sys.databases WHERE is_distributor = 1)' + @nl ;
 	END; 
 
-IF @DatabaseName IS NOT NULL OR @DatabaseName <> ''
+IF @DatabaseName IS NOT NULL OR @DatabaseName <> N''
 	BEGIN 
     RAISERROR(N'Filtering database name chosen', 0, 1) WITH NOWAIT;
-	SET @body += N'               AND CAST(xpa.value AS BIGINT) = DB_ID('
+	SET @body += N'               AND CAST(xpa.value AS BIGINT) = DB_ID(N'
                  + QUOTENAME(@DatabaseName, N'''')
                  + N') ' + @nl;
 	END; 
@@ -13854,7 +14094,7 @@ SELECT TOP (@Top)
 	   + QUOTENAME(COALESCE(OBJECT_SCHEMA_NAME(qs.object_id, qs.database_id),''''))
 	   + ''.''
 	   + QUOTENAME(COALESCE(OBJECT_NAME(qs.object_id, qs.database_id),'''')) AS QueryType,
-       COALESCE(DB_NAME(database_id), CAST(pa.value AS sysname), ''-- N/A --'') AS DatabaseName,
+       COALESCE(DB_NAME(database_id), CAST(pa.value AS sysname), N''-- N/A --'') AS DatabaseName,
        (total_worker_time / 1000.0) / execution_count AS AvgCPU ,
        (total_worker_time / 1000.0) AS TotalCPU ,
        CASE WHEN total_worker_time = 0 THEN 0
@@ -13905,9 +14145,9 @@ SELECT TOP (@Top)
        NULL AS MinUsedGrantKB, 
 	   NULL AS MaxUsedGrantKB,
 	   NULL AS PercentMemoryGrantUsed, 
-	   NULL AS AvgMaxMemoryGrant,'
+	   NULL AS AvgMaxMemoryGrant,';
 
-		IF @v >=14
+		IF @v >=15 OR (@v = 14 AND @build >= 3015) OR (@v = 13 AND @build >= 5026)
     BEGIN
         RAISERROR(N'Getting spill information for newer versions of SQL', 0, 1) WITH NOWAIT;
 		SET @plans_triggers_select_list += N'
@@ -13955,7 +14195,7 @@ BEGIN
     SELECT TOP (@Top)
            @@SPID ,
            ''Statement'' AS QueryType,
-           COALESCE(DB_NAME(CAST(pa.value AS INT)), ''-- N/A --'') AS DatabaseName,
+           COALESCE(DB_NAME(CAST(pa.value AS INT)), N''-- N/A --'') AS DatabaseName,
            (total_worker_time / 1000.0) / execution_count AS AvgCPU ,
            (total_worker_time / 1000.0) AS TotalCPU ,
            CASE WHEN total_worker_time = 0 THEN 0
@@ -14040,7 +14280,7 @@ BEGIN
 		   NULL AS AvgMaxMemoryGrant, ' ;
     END;
 
-		IF @v >=14
+		IF @v >=15 OR (@v = 14 AND @build >= 3015) OR (@v = 13 AND @build >= 5026)
     BEGIN
         RAISERROR(N'Getting spill information for newer versions of SQL', 0, 1) WITH NOWAIT;
 		SET @sql += N'
@@ -14542,6 +14782,8 @@ AND SPID = @@SPID
 WHERE statement.exist('/p:StmtSimple/@StatementOptmEarlyAbortReason[.="MemoryLimitExceeded"]') = 1
 OPTION (RECOMPILE);
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Performing unparameterized query checks', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 unparameterized_query AS (
@@ -14561,8 +14803,11 @@ ON  u.QueryHash = b.QueryHash
 AND SPID = @@SPID
 WHERE u.unparameterized_query = 1
 OPTION (RECOMPILE);
+END;
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Performing index DML checks', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 index_dml AS (
@@ -14580,7 +14825,11 @@ index_dml AS (
 	WHERE i.index_dml = 1
 	AND b.SPID = @@SPID
 	OPTION (RECOMPILE);
+END;
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Performing table DML checks', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 table_dml AS (
@@ -14598,8 +14847,11 @@ table_dml AS (
 	WHERE t.table_dml = 1
 	AND b.SPID = @@SPID
 	OPTION (RECOMPILE);
+END; 
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Gathering row estimates', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES ('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
 INSERT INTO #est_rows
@@ -14618,6 +14870,7 @@ WHERE  c.n.exist('/p:StmtSimple[@StatementEstRows > 0]') = 1;
 	WHERE b.SPID = @@SPID
 	AND b.QueryType = 'Statement'
 	OPTION (RECOMPILE);
+END;
 
 RAISERROR(N'Gathering trivial plans', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
@@ -14640,10 +14893,11 @@ OPTION (RECOMPILE);
 --Gather costs
 RAISERROR(N'Gathering statement costs', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
-INSERT INTO #plan_cost
+INSERT INTO #plan_cost ( QueryPlanCost, SqlHandle, PlanHandle, QueryHash, QueryPlanHash )
 SELECT  DISTINCT
 		statement.value('sum(/p:StmtSimple/@StatementSubTreeCost)', 'float') QueryPlanCost,
 		s.SqlHandle,
+		s.PlanHandle,
 		CONVERT(BINARY(8), RIGHT('0000000000000000' + SUBSTRING(q.n.value('@QueryHash', 'VARCHAR(18)'), 3, 18), 16), 2) AS QueryHash,
 		CONVERT(BINARY(8), RIGHT('0000000000000000' + SUBSTRING(q.n.value('@QueryPlanHash', 'VARCHAR(18)'), 3, 18), 16), 2) AS QueryPlanHash
 FROM #statements s
@@ -14653,16 +14907,16 @@ OPTION (RECOMPILE);
 
 RAISERROR(N'Updating statement costs', 0, 1) WITH NOWAIT;
 WITH pc AS (
-	SELECT SUM(DISTINCT pc.QueryPlanCost) AS QueryPlanCostSum, pc.QueryHash, pc.QueryPlanHash
+	SELECT SUM(DISTINCT pc.QueryPlanCost) AS QueryPlanCostSum, pc.QueryHash, pc.QueryPlanHash, pc.SqlHandle, pc.PlanHandle
 	FROM #plan_cost AS pc
-	GROUP BY pc.QueryHash, pc.QueryPlanHash
+	GROUP BY pc.QueryHash, pc.QueryPlanHash, pc.SqlHandle, pc.PlanHandle
 )
 	UPDATE b
 		SET b.QueryPlanCost = ISNULL(pc.QueryPlanCostSum, 0)
 		FROM pc
 		JOIN ##bou_BlitzCacheProcs b
-		ON b.QueryPlanHash = pc.QueryPlanHash
-		OR b.QueryHash = pc.QueryHash
+		ON b.SqlHandle = pc.SqlHandle
+		AND b.QueryHash = pc.QueryHash
 		WHERE b.QueryType NOT LIKE '%Procedure%'
 	OPTION (RECOMPILE);
 
@@ -14741,6 +14995,8 @@ AND query_plan.exist('/p:QueryPlan/p:Warnings/p:PlanAffectingConvert/@Expression
 OPTION (RECOMPILE);
 
 -- operator level checks
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Performing busy loops checks', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE p
@@ -14754,6 +15010,8 @@ FROM   ##bou_BlitzCacheProcs p
        ) AS x ON p.SqlHandle = x.SqlHandle
 WHERE SPID = @@SPID
 OPTION (RECOMPILE);
+END; 
+
 
 RAISERROR(N'Performing TVF join check', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
@@ -14770,6 +15028,8 @@ FROM   ##bou_BlitzCacheProcs p
 WHERE SPID = @@SPID
 OPTION (RECOMPILE);
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for operator warnings', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 , x AS (
@@ -14788,6 +15048,7 @@ FROM ##bou_BlitzCacheProcs AS p
 JOIN x ON x.SqlHandle = p.SqlHandle
 AND SPID = @@SPID
 OPTION (RECOMPILE);
+END; 
 
 
 RAISERROR(N'Checking for table variables', 0, 1) WITH NOWAIT;
@@ -14806,6 +15067,8 @@ AND SPID = @@SPID
 WHERE x.first_char = '@'
 OPTION (RECOMPILE);
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for functions', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 , x AS (
@@ -14822,6 +15085,7 @@ FROM ##bou_BlitzCacheProcs AS p
 JOIN x ON x.SqlHandle = p.SqlHandle
 AND SPID = @@SPID
 OPTION (RECOMPILE);
+END; 
 
 
 RAISERROR(N'Checking for expensive key lookups', 0, 1) WITH NOWAIT;
@@ -14902,6 +15166,18 @@ WHERE SPID = @@SPID
 AND n1.fn.exist('//p:CursorPlan/@ForwardOnly[.="true"]') = 1
 OPTION (RECOMPILE);
 
+RAISERROR(N'Checking if cursor is Fast Forward', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+UPDATE b
+SET b.is_fast_forward_cursor = 1
+FROM ##bou_BlitzCacheProcs b
+JOIN #statements AS qs
+ON b.SqlHandle = qs.SqlHandle
+CROSS APPLY qs.statement.nodes('/p:StmtCursor') AS n1(fn)
+WHERE SPID = @@SPID
+AND n1.fn.exist('//p:CursorPlan/@CursorActualType[.="FastForward"]') = 1
+OPTION (RECOMPILE);
+
 
 RAISERROR(N'Checking for Dynamic cursors', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
@@ -14915,8 +15191,8 @@ WHERE SPID = @@SPID
 AND n1.fn.exist('//p:CursorPlan/@CursorActualType[.="Dynamic"]') = 1
 OPTION (RECOMPILE);
 
-
-
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for bad scans and plan forcing', 0, 1) WITH NOWAIT;
 ;WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -14950,8 +15226,11 @@ CROSS APPLY qs.relop.nodes('//p:TableScan') AS q(n)
 ) AS x ON b.SqlHandle = x.SqlHandle
 WHERE SPID = @@SPID
 OPTION (RECOMPILE);
+END; 
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for computed columns that reference scalar UDFs', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE ##bou_BlitzCacheProcs
@@ -14966,6 +15245,7 @@ WHERE n.fn.exist('/p:RelOp/p:ComputeScalar/p:DefinedValues/p:DefinedValue/p:Colu
 WHERE ##bou_BlitzCacheProcs.SqlHandle = x.SqlHandle
 AND SPID = @@SPID
 OPTION (RECOMPILE);
+END; 
 
 
 RAISERROR(N'Checking for filters that reference scalar UDFs', 0, 1) WITH NOWAIT;
@@ -14983,6 +15263,8 @@ WHERE ##bou_BlitzCacheProcs.SqlHandle = x.SqlHandle
 AND SPID = @@SPID
 OPTION (RECOMPILE);
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking modification queries that hit lots of indexes', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),	
 IndexOps AS 
@@ -15035,7 +15317,11 @@ FROM ##bou_BlitzCacheProcs AS b
 JOIN iops ON  iops.QueryHash = b.QueryHash
 WHERE SPID = @@SPID
 OPTION (RECOMPILE);
+END; 
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for Spatial index use', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE ##bou_BlitzCacheProcs
@@ -15050,7 +15336,11 @@ WHERE n.fn.exist('(@IndexKind[.="Spatial"])') = 1
 WHERE ##bou_BlitzCacheProcs.SqlHandle = x.SqlHandle
 AND SPID = @@SPID
 OPTION (RECOMPILE);
+END; 
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR('Checking for wonky Index Spools', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES (
     'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
@@ -15077,6 +15367,7 @@ FROM ##bou_BlitzCacheProcs b
 JOIN spools sp
 ON sp.QueryHash = b.QueryHash
 OPTION (RECOMPILE);
+END; 
 
 
 /* 2012+ only */
@@ -15094,7 +15385,8 @@ BEGIN
 	AND (##bou_BlitzCacheProcs.is_parallel = 0 OR ##bou_BlitzCacheProcs.is_parallel IS NULL)
 	OPTION (RECOMPILE);
 	
-	
+	IF @ExpertMode > 0
+	BEGIN
 	RAISERROR(N'Checking for ColumnStore queries operating in Row Mode instead of Batch Mode', 0, 1) WITH NOWAIT;
 	WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 	UPDATE ##bou_BlitzCacheProcs
@@ -15109,6 +15401,7 @@ BEGIN
 	WHERE ##bou_BlitzCacheProcs.SqlHandle = x.SqlHandle
 	AND SPID = @@SPID
 	OPTION (RECOMPILE);
+	END; 
 
 END;
 
@@ -15127,7 +15420,7 @@ BEGIN
 END ;
 
 /* 2016+ only */
-IF @v >= 13
+IF @v >= 13 AND @ExpertMode > 0
 BEGIN
     RAISERROR('Checking for row level security in 2016 only', 0, 1) WITH NOWAIT;
 
@@ -15142,9 +15435,11 @@ BEGIN
 END ;
 
 /* 2017+ only */
-IF @v >= 14
+IF @v >= 14 OR	(@v = 13 AND @build >= 5026)
 BEGIN
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR('Gathering stats information', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 INSERT INTO #stats_agg
@@ -15159,6 +15454,7 @@ SELECT qp.SqlHandle,
 FROM #query_plan AS qp
 CROSS APPLY qp.query_plan.nodes('//p:OptimizerStatsUsage/p:StatisticsInfo') x (c)
 OPTION (RECOMPILE);
+
 
 RAISERROR('Checking for stale stats', 0, 1) WITH NOWAIT;
 WITH  stale_stats AS (
@@ -15175,7 +15471,11 @@ JOIN stale_stats os
 ON b.SqlHandle = os.SqlHandle
 AND b.SPID = @@SPID
 OPTION (RECOMPILE);
+END;
 
+IF @v >= 14 AND @ExpertMode > 0
+BEGIN
+RAISERROR('Checking for adaptive joins', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 aj AS (
 	SELECT 
@@ -15191,7 +15491,10 @@ JOIN aj
 ON b.SqlHandle = aj.SqlHandle
 AND b.SPID = @@SPID
 OPTION (RECOMPILE);
+END; 
 
+IF @ExpertMode > 0
+BEGIN;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 row_goals AS(
 SELECT qs.QueryHash
@@ -15205,7 +15508,7 @@ JOIN row_goals
 ON b.QueryHash = row_goals.QueryHash
 AND b.SPID = @@SPID
 OPTION (RECOMPILE);
-
+END ;
 
 END;
 
@@ -15214,7 +15517,7 @@ RAISERROR(N'Performing query level checks', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE  ##bou_BlitzCacheProcs
 SET     missing_index_count = query_plan.value('count(//p:QueryPlan/p:MissingIndexes/p:MissingIndexGroup)', 'int') ,
-		unmatched_index_count = query_plan.value('count(//p:QueryPlan/p:UnmatchedIndexes/p:Parameterization/p:Object)', 'int') ,
+		unmatched_index_count = CASE WHEN is_trivial <> 1 THEN query_plan.value('count(//p:QueryPlan/p:UnmatchedIndexes/p:Parameterization/p:Object)', 'int') END ,
         SerialDesiredMemory = query_plan.value('sum(//p:QueryPlan/p:MemoryGrantInfo/@SerialDesiredMemory)', 'float') ,
         SerialRequiredMemory = query_plan.value('sum(//p:QueryPlan/p:MemoryGrantInfo/@SerialRequiredMemory)', 'float'),
         CachedPlanSize = query_plan.value('sum(//p:QueryPlan/@CachedPlanSize)', 'float') ,
@@ -15258,9 +15561,10 @@ WHERE   QueryType = 'Statement'
 AND SPID = @@SPID
 OPTION (RECOMPILE);
 
-/* Trace Flag Checks 2014 SP2 and 2016 SP1 only)*/
+/* Trace Flag Checks 2012 SP3, 2014 SP2 and 2016 SP1 only)*/
 IF @v >= 11
 BEGIN
+
 RAISERROR(N'Trace flag checks', 0, 1) WITH NOWAIT;
 ;WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 , tf_pretty AS (
@@ -15298,7 +15602,9 @@ FROM   ##bou_BlitzCacheProcs p
 JOIN #trace_flags tf ON tf.QueryHash = p.QueryHash 
 WHERE SPID = @@SPID
 OPTION (RECOMPILE);
+
 END;
+
 
 RAISERROR(N'Checking for MSTVFs', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
@@ -15310,6 +15616,9 @@ ON b.SqlHandle = r.SqlHandle
 WHERE  r.relop.exist('/p:RelOp[(@EstimateRows="100" or @EstimateRows="1") and @LogicalOp="Table-valued function"]') = 1
 OPTION (RECOMPILE);
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for many to many merge joins', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -15319,7 +15628,11 @@ JOIN ##bou_BlitzCacheProcs AS b
 ON b.SqlHandle = r.SqlHandle
 WHERE  r.relop.exist('/p:RelOp/p:Merge/@ManyToMany[.="1"]') = 1
 OPTION (RECOMPILE);
+END ;
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Is Paul White Electric?', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 is_paul_white_electric AS (
@@ -15336,6 +15649,8 @@ JOIN is_paul_white_electric ipwe
 ON ipwe.SqlHandle = b.SqlHandle 
 WHERE b.SPID = @@SPID
 OPTION (RECOMPILE);
+END ;
+
 
 RAISERROR(N'Checking for non-sargable predicates', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
@@ -15376,11 +15691,6 @@ JOIN    ##bou_BlitzCacheProcs AS b
 WHERE   b.SPID = @@SPID
 OPTION ( RECOMPILE );
 
-IF EXISTS ( SELECT 1 
-			FROM ##bou_BlitzCacheProcs AS bbcp 
-			WHERE bbcp.implicit_conversions = 1 
-			OR bbcp.QueryType LIKE '%Procedure or Function: %')
-BEGIN
 
 RAISERROR(N'Getting information about implicit conversions and stored proc parameters', 0, 1) WITH NOWAIT;
 
@@ -15468,7 +15778,7 @@ OPTION (RECOMPILE);
 
 
 
-RAISERROR(N'Updating variables inserted procs', 0, 1) WITH NOWAIT;
+RAISERROR(N'Updating variables for inserted procs', 0, 1) WITH NOWAIT;
 UPDATE sp
 SET sp.variable_datatype = vi.variable_datatype,
 	sp.compile_time_value = vi.compile_time_value
@@ -15521,15 +15831,45 @@ SET    s.variable_datatype = CASE WHEN s.variable_datatype LIKE '%(%)%' THEN
 FROM   #stored_proc_info AS s
 OPTION (RECOMPILE);
 
+
+RAISERROR(N'Updating SET options', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+UPDATE s
+SET set_options = set_options.ansi_set_options
+FROM #stored_proc_info AS s
+JOIN (
+		SELECT  x.SqlHandle,
+				N'SET ANSI_NULLS = ' + CASE WHEN [ANSI_NULLS] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+				N'SET ANSI_PADDING = ' + CASE WHEN [ANSI_PADDING] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+				N'SET ANSI_WARNINGS = ' + CASE WHEN [ANSI_WARNINGS] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+				N'SET ARITHABORT = ' + CASE WHEN [ARITHABORT] = 'true' THEN N'ON ' ELSE N' OFF ' END + NCHAR(10) +
+				N'SET CONCAT_NULL_YIELDS_NULL = ' + CASE WHEN [CONCAT_NULL_YIELDS_NULL] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+				N'SET NUMERIC_ROUNDABORT = ' + CASE WHEN [NUMERIC_ROUNDABORT] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+				N'SET QUOTED_IDENTIFIER = ' + CASE WHEN [QUOTED_IDENTIFIER] = 'true' THEN N'ON ' ELSE N'OFF ' + NCHAR(10) END AS [ansi_set_options]
+		FROM (
+			SELECT
+				s.SqlHandle,
+				so.o.value('@ANSI_NULLS', 'NVARCHAR(20)') AS [ANSI_NULLS],
+				so.o.value('@ANSI_PADDING', 'NVARCHAR(20)') AS [ANSI_PADDING],
+				so.o.value('@ANSI_WARNINGS', 'NVARCHAR(20)') AS [ANSI_WARNINGS],
+				so.o.value('@ARITHABORT', 'NVARCHAR(20)') AS [ARITHABORT],
+				so.o.value('@CONCAT_NULL_YIELDS_NULL', 'NVARCHAR(20)') AS [CONCAT_NULL_YIELDS_NULL],
+				so.o.value('@NUMERIC_ROUNDABORT', 'NVARCHAR(20)') AS [NUMERIC_ROUNDABORT],
+				so.o.value('@QUOTED_IDENTIFIER', 'NVARCHAR(20)') AS [QUOTED_IDENTIFIER]
+			FROM #statements AS s
+			CROSS APPLY s.statement.nodes('//p:StatementSetOptions') AS so(o)
+		   ) AS x
+) AS set_options ON set_options.SqlHandle = s.SqlHandle
+OPTION(RECOMPILE);
+
+
 RAISERROR(N'Updating conversion XML', 0, 1) WITH NOWAIT;
 WITH precheck AS (
 SELECT spi.SPID,
 	   spi.SqlHandle,
 	   spi.proc_name,
-			CONVERT(XML, 
-			N'<ClickMe><![CDATA['
-			+ @nl
-			+ CASE WHEN spi.proc_name <> 'Statement' 
+			(SELECT  
+			  CASE WHEN spi.proc_name <> 'Statement' 
 				   THEN N'The stored procedure ' + spi.proc_name 
 				   ELSE N'This ad hoc statement' 
 			  END
@@ -15581,9 +15921,8 @@ SELECT spi.SPID,
 				FROM #stored_proc_info AS spi2
 				WHERE spi.SqlHandle = spi2.SqlHandle
 				FOR XML PATH(N''), TYPE).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 1, N'')
-			+ CHAR(10)
-			+ N']]></ClickMe>'
-			) AS implicit_conversion_info
+			  AS [processing-instruction(ClickMe)] FOR XML PATH(''), TYPE )
+			AS implicit_conversion_info
 FROM #stored_proc_info AS spi
 GROUP BY spi.SPID, spi.SqlHandle, spi.proc_name
 )
@@ -15595,13 +15934,15 @@ ON pk.SqlHandle = b.SqlHandle
 AND pk.SPID = b.SPID
 OPTION (RECOMPILE);
 
-RAISERROR(N'Updating cached parameter XML', 0, 1) WITH NOWAIT;
+
+RAISERROR(N'Updating cached parameter XML for stored procs', 0, 1) WITH NOWAIT;
 WITH precheck AS (
 SELECT spi.SPID,
 	   spi.SqlHandle,
 	   spi.proc_name,
-CONVERT(XML, 
-			N'<ClickMe><![CDATA['
+	   (SELECT 
+			set_options
+			+ @nl
 			+ @nl
 			+ N'EXEC ' 
 			+ spi.proc_name 
@@ -15622,11 +15963,10 @@ CONVERT(XML,
 				WHERE spi.SqlHandle = spi2.SqlHandle
 				AND spi2.proc_name <> N'Statement'
 				FOR XML PATH(N''), TYPE).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 1, N'')
-			+ @nl
-			+ N']]></ClickMe>'
-			) AS cached_execution_parameters
+			AS [processing-instruction(ClickMe)] FOR XML PATH(''), TYPE )
+			AS cached_execution_parameters
 FROM #stored_proc_info AS spi
-GROUP BY spi.SPID, spi.SqlHandle, spi.proc_name
+GROUP BY spi.SPID, spi.SqlHandle, spi.proc_name, spi.set_options
 ) 
 UPDATE b
 SET b.cached_execution_parameters = pk.cached_execution_parameters
@@ -15634,14 +15974,64 @@ FROM ##bou_BlitzCacheProcs AS b
 JOIN precheck pk
 ON pk.SqlHandle = b.SqlHandle
 AND pk.SPID = b.SPID
+WHERE b.QueryType <> N'Statement'
 OPTION (RECOMPILE);
 
 
-END; --End implicit conversion information gathering
-
+RAISERROR(N'Updating cached parameter XML for statements', 0, 1) WITH NOWAIT;
+WITH precheck AS (
+SELECT spi.SPID,
+	   spi.SqlHandle,
+	   spi.proc_name,
+	   (SELECT 
+			set_options
+			+ @nl
+			+ @nl
+			+ N' See QueryText column for full query text'
+			+ @nl
+			+ @nl
+			+ STUFF((
+				SELECT DISTINCT N', ' 
+						+ CASE WHEN spi2.variable_name <> N'**no_variable**' AND spi2.compile_time_value <> N'**idk_man**'
+								THEN spi2.variable_name + N' = '
+								ELSE @nl + N' We could not find any cached parameter values for this stored proc. ' 
+						  END
+						+ CASE WHEN spi2.variable_name = N'**no_variable**' OR spi2.compile_time_value = N'**idk_man**'
+							   THEN @nl + N' Possible reasons include declared variables inside the procedure, recompile hints, etc. '
+							   WHEN spi2.compile_time_value = N'NULL' 
+							   THEN spi2.compile_time_value 
+							   ELSE RTRIM(spi2.compile_time_value)
+						  END
+				FROM #stored_proc_info AS spi2
+				WHERE spi.SqlHandle = spi2.SqlHandle
+				AND spi2.proc_name = N'Statement'
+				AND spi2.variable_name NOT LIKE N'%msparam%'
+				FOR XML PATH(N''), TYPE).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 1, N'')
+			AS [processing-instruction(ClickMe)] FOR XML PATH(''), TYPE )
+			AS cached_execution_parameters
+FROM #stored_proc_info AS spi
+GROUP BY spi.SPID, spi.SqlHandle, spi.proc_name, spi.set_options
+) 
 UPDATE b
-SET b.implicit_conversion_info = CASE WHEN b.implicit_conversion_info IS NULL THEN '<?NoNeedToClickMe -- N/A --?>' ELSE b.implicit_conversion_info END,
-	b.cached_execution_parameters = CASE WHEN b.cached_execution_parameters IS NULL THEN '<?NoNeedToClickMe -- N/A --?>' ELSE b.cached_execution_parameters END
+SET b.cached_execution_parameters = pk.cached_execution_parameters
+FROM ##bou_BlitzCacheProcs AS b
+JOIN precheck pk
+ON pk.SqlHandle = b.SqlHandle
+AND pk.SPID = b.SPID
+WHERE b.QueryType = N'Statement'
+OPTION (RECOMPILE);
+
+
+RAISERROR(N'Filling in implicit conversion info', 0, 1) WITH NOWAIT;
+UPDATE b
+SET b.implicit_conversion_info = CASE WHEN b.implicit_conversion_info IS NULL 
+									  OR CONVERT(NVARCHAR(4000), b.implicit_conversion_info) = N''
+									  THEN '<?NoNeedToClickMe -- N/A --?>' 
+							     ELSE b.implicit_conversion_info END,
+	b.cached_execution_parameters = CASE WHEN b.cached_execution_parameters IS NULL 
+										 OR CONVERT(NVARCHAR(4000), b.cached_execution_parameters) = N''
+										 THEN '<?NoNeedToClickMe -- N/A --?>' 
+									ELSE b.cached_execution_parameters END
 FROM ##bou_BlitzCacheProcs AS b
 WHERE b.SPID = @@SPID
 OPTION (RECOMPILE);
@@ -15650,8 +16040,9 @@ OPTION (RECOMPILE);
 
 IF EXISTS 
 	(SELECT 1 FROM ##bou_BlitzCacheProcs AS bbcp WHERE bbcp.missing_index_count > 0 AND bbcp.SPID = @@SPID)
-	BEGIN
-	
+	BEGIN;
+		
+		RAISERROR(N'Inserting to #missing_index_xml', 0, 1) WITH NOWAIT;
 		WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
 		INSERT 	#missing_index_xml
 		SELECT qp.QueryHash,
@@ -15664,6 +16055,7 @@ IF EXISTS
 		AND c.mg.value('@Impact', 'FLOAT') > 70.0
 		OPTION(RECOMPILE);
 		
+		RAISERROR(N'Inserting to #missing_index_schema', 0, 1) WITH NOWAIT;	
 		WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
 		INSERT #missing_index_schema
 		SELECT mix.QueryHash, mix.SqlHandle, mix.impact,
@@ -15675,6 +16067,7 @@ IF EXISTS
 		CROSS APPLY mix.index_xml.nodes('//p:MissingIndex') AS c(mi)
 		OPTION(RECOMPILE);
 		
+		RAISERROR(N'Inserting to #missing_index_usage', 0, 1) WITH NOWAIT;
 		WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
 		INSERT #missing_index_usage
 		SELECT ms.QueryHash, ms.SqlHandle, ms.impact, ms.database_name, ms.schema_name, ms.table_name,
@@ -15684,6 +16077,7 @@ IF EXISTS
 		CROSS APPLY ms.index_xml.nodes('//p:ColumnGroup') AS c(cg)
 		OPTION(RECOMPILE);
 		
+		RAISERROR(N'Inserting to #missing_index_detail', 0, 1) WITH NOWAIT;
 		WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
 		INSERT #missing_index_detail
 		SELECT miu.QueryHash,
@@ -15698,6 +16092,7 @@ IF EXISTS
 		CROSS APPLY miu.index_xml.nodes('//p:Column') AS c(c)
 		OPTION (RECOMPILE);
 		
+		RAISERROR(N'Inserting to #missing_index_pretty', 0, 1) WITH NOWAIT;
 		INSERT #missing_index_pretty
 		SELECT m.QueryHash, m.SqlHandle, m.impact, m.database_name, m.schema_name, m.table_name
 		, STUFF((   SELECT DISTINCT N', ' + ISNULL(m2.column_name, '') AS column_name
@@ -15734,6 +16129,7 @@ IF EXISTS
 		GROUP BY m.QueryHash, m.SqlHandle, m.impact, m.database_name, m.schema_name, m.table_name
 		OPTION (RECOMPILE);
 		
+		RAISERROR(N'Updating missing index information', 0, 1) WITH NOWAIT;
 		WITH missing AS (
 		SELECT mip.QueryHash,
 		       mip.SqlHandle, 
@@ -15762,8 +16158,9 @@ IF EXISTS
 		OPTION (RECOMPILE);
 
 	
-	END
+	END;
 
+	RAISERROR(N'Filling in missing index blanks', 0, 1) WITH NOWAIT;
 	UPDATE b
 	SET b.missing_indexes = 
 		CASE WHEN b.missing_indexes IS NULL 
@@ -15875,13 +16272,13 @@ RAISERROR('Checking for query level SQL Server issues.', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE ##bou_BlitzCacheProcs
 SET    frequent_execution = CASE WHEN ExecutionsPerMinute > @execution_threshold THEN 1 END ,
-       parameter_sniffing = CASE WHEN AverageReads > @parameter_sniffing_io_threshold
+       parameter_sniffing = CASE WHEN ExecutionCount > 3 AND AverageReads > @parameter_sniffing_io_threshold
                                       AND min_worker_time < ((1.0 - (@parameter_sniffing_warning_pct / 100.0)) * AverageCPU) THEN 1
-                                 WHEN AverageReads > @parameter_sniffing_io_threshold
+                                 WHEN ExecutionCount > 3 AND AverageReads > @parameter_sniffing_io_threshold
                                       AND max_worker_time > ((1.0 + (@parameter_sniffing_warning_pct / 100.0)) * AverageCPU) THEN 1
-                                 WHEN AverageReads > @parameter_sniffing_io_threshold
+                                 WHEN ExecutionCount > 3 AND AverageReads > @parameter_sniffing_io_threshold
                                       AND MinReturnedRows < ((1.0 - (@parameter_sniffing_warning_pct / 100.0)) * AverageReturnedRows) THEN 1
-                                 WHEN AverageReads > @parameter_sniffing_io_threshold
+                                 WHEN ExecutionCount > 3 AND AverageReads > @parameter_sniffing_io_threshold
                                       AND MaxReturnedRows > ((1.0 + (@parameter_sniffing_warning_pct / 100.0)) * AverageReturnedRows) THEN 1 END ,
        near_parallel = CASE WHEN QueryPlanCost BETWEEN @ctp * (1 - (@ctp_threshold_pct / 100.0)) AND @ctp THEN 1 END,
        long_running = CASE WHEN AverageDuration > @long_running_query_warning_seconds THEN 1
@@ -15892,8 +16289,8 @@ SET    frequent_execution = CASE WHEN ExecutionsPerMinute > @execution_threshold
 	   is_remote_query_expensive = CASE WHEN remote_query_cost >= QueryPlanCost * .05 THEN 1 END,
 	   is_forced_serial = CASE WHEN is_forced_serial = 1 THEN 1 END,
 	   is_unused_grant = CASE WHEN PercentMemoryGrantUsed <= @memory_grant_warning_percent AND MinGrantKB > @MinMemoryPerQuery THEN 1 END,
-	   long_running_low_cpu = CASE WHEN AverageDuration > AverageCPU * 4 THEN 1 END,
-	   low_cost_high_cpu = CASE WHEN QueryPlanCost < @ctp AND AverageCPU > 500. AND QueryPlanCost * 10 < AverageCPU THEN 1 END,
+	   long_running_low_cpu = CASE WHEN AverageDuration > AverageCPU * 4 AND AverageCPU < 500. THEN 1 END,
+	   low_cost_high_cpu = CASE WHEN QueryPlanCost <= 10 AND AverageCPU > 5000. THEN 1 END,
 	   is_spool_expensive = CASE WHEN QueryPlanCost > (@ctp / 2) AND index_spool_cost >= QueryPlanCost * .1 THEN 1 END,
 	   is_spool_more_rows = CASE WHEN index_spool_rows >= (AverageReturnedRows / ISNULL(NULLIF(ExecutionCount, 0), 1)) THEN 1 END,
 	   is_bad_estimate = CASE WHEN AverageReturnedRows > 0 AND (estimated_rows * 1000 < AverageReturnedRows OR estimated_rows > AverageReturnedRows * 1000) THEN 1 END,
@@ -15960,7 +16357,8 @@ SET    Warnings = SUBSTRING(
                   CASE WHEN is_cursor = 1 THEN ', Cursor' 
 							+ CASE WHEN is_optimistic_cursor = 1 THEN '; optimistic' ELSE '' END
 							+ CASE WHEN is_forward_only_cursor = 0 THEN '; not forward only' ELSE '' END
-							+ CASE WHEN is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END		
+							+ CASE WHEN is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END
+                            + CASE WHEN is_fast_forward_cursor = 1 THEN '; fast forward' ELSE '' END		
 				  ELSE '' END +
                   CASE WHEN is_parallel = 1 THEN ', Parallel' ELSE '' END +
                   CASE WHEN near_parallel = 1 THEN ', Nearly Parallel' ELSE '' END +
@@ -16011,7 +16409,7 @@ SET    Warnings = SUBSTRING(
 				  CASE WHEN is_mstvf = 1 THEN ', MSTVFs' ELSE '' END + 
 				  CASE WHEN is_mm_join = 1 THEN ', Many to Many Merge' ELSE '' END + 
                   CASE WHEN is_nonsargable = 1 THEN ', non-SARGables' ELSE '' END
-				  , 2, 200000) 
+				  , 3, 200000) 
 WHERE SPID = @@SPID
 OPTION (RECOMPILE);
 
@@ -16034,7 +16432,8 @@ SELECT  DISTINCT
                   CASE WHEN is_cursor = 1 THEN ', Cursor' 
 							+ CASE WHEN is_optimistic_cursor = 1 THEN '; optimistic' ELSE '' END
 							+ CASE WHEN is_forward_only_cursor = 0 THEN '; not forward only' ELSE '' END
-							+ CASE WHEN is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END								
+							+ CASE WHEN is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END
+                            + CASE WHEN is_fast_forward_cursor = 1 THEN '; fast forward' ELSE '' END								
 				  ELSE '' END +
                   CASE WHEN is_parallel = 1 THEN ', Parallel' ELSE '' END +
                   CASE WHEN near_parallel = 1 THEN ', Nearly Parallel' ELSE '' END +
@@ -16085,7 +16484,7 @@ SELECT  DISTINCT
 				  CASE WHEN is_mstvf = 1 THEN ', MSTVFs' ELSE '' END + 
 				  CASE WHEN is_mm_join = 1 THEN ', Many to Many Merge' ELSE '' END + 
                   CASE WHEN is_nonsargable = 1 THEN ', non-SARGables' ELSE '' END
-                  , 2, 200000) 
+                  , 3, 200000) 
 FROM ##bou_BlitzCacheProcs b
 WHERE SPID = @@SPID
 AND QueryType LIKE 'Statement (parent%'
@@ -16122,7 +16521,11 @@ OPTION (RECOMPILE);
 
 RAISERROR('Checking for plans with no warnings', 0, 1) WITH NOWAIT;	
 UPDATE ##bou_BlitzCacheProcs
-SET Warnings = 'No warnings detected.'
+SET Warnings = 'No warnings detected. ' + CASE @ExpertMode 
+											WHEN 0 
+											THEN ' Try running sp_BlitzCache with @ExpertMode = 1 to find more advanced problems.' 
+											ELSE '' 
+										  END
 WHERE Warnings = '' OR	Warnings IS NULL
 AND SPID = @@SPID
 OPTION (RECOMPILE);
@@ -16245,7 +16648,7 @@ BEGIN
     IF @CheckDateOverride IS NULL
         BEGIN
         SET @CheckDateOverride = SYSDATETIMEOFFSET();
-        END
+        END;
 
 
     SET @insert_sql =N' IF EXISTS(SELECT * FROM '
@@ -16556,7 +16959,7 @@ BEGIN
 				  CASE WHEN is_mstvf = 1 THEN '', 60'' ELSE '''' END + 
 				  CASE WHEN is_mm_join = 1 THEN '', 61'' ELSE '''' END  + 
                   CASE WHEN is_nonsargable = 1 THEN '', 62'' ELSE '''' END
-				  , 2, 200000) AS opserver_warning , ' + @nl ;
+				  , 3, 200000) AS opserver_warning , ' + @nl ;
     END;
     
     SET @columns += N'        ExecutionCount AS [# Executions],
@@ -16709,7 +17112,7 @@ BEGIN
             INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
             VALUES (@@SPID,
                     3,
-                    5,
+                    50,
                     'Parameterization',
                     'Forced Plans',
                     'http://brentozar.com/blitzcache/forced-plans/',
@@ -16769,6 +17172,20 @@ BEGIN
                     'Dynamic Cursors',
                     'http://brentozar.com/blitzcache/cursors-found-slow-queries/',
                     'Dynamic Cursors inhibit parallelism!.');
+
+        IF EXISTS (SELECT 1/0
+                   FROM   ##bou_BlitzCacheProcs
+                   WHERE  is_cursor = 1
+				   AND is_fast_forward_cursor = 1
+				   AND SPID = @@SPID)
+            INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
+            VALUES (@@SPID,
+                    4,
+                    200,
+                    'Cursors',
+                    'Fast Forward Cursors',
+                    'http://brentozar.com/blitzcache/cursors-found-slow-queries/',
+                    'Fast forward cursors inhibit parallelism!.');
 
         IF EXISTS (SELECT 1/0
                    FROM   ##bou_BlitzCacheProcs
@@ -16883,9 +17300,9 @@ BEGIN
         INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
         VALUES (@@SPID,
                 16,
-                10,
+                100,
                 'Performance',
-                'Frequently executed operators',
+                'Busy Loops',
                 'http://brentozar.com/blitzcache/busy-loops/',
                 'Operations have been found that are executed 100 times more often than the number of rows returned by each iteration. This is an indicator that something is off in query execution.');
 
@@ -16935,7 +17352,7 @@ BEGIN
         INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
         VALUES (@@SPID,
                 20,
-                10,
+                50,
                 'Execution Plans',
                 'No join predicate',
                 'http://brentozar.com/blitzcache/no-join-predicate/',
@@ -17039,7 +17456,7 @@ BEGIN
             INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
             VALUES (@@SPID,
                     29,
-                    100,
+                    200,
                     'Trace Flags',
                     'Session Level Trace Flags Enabled',
                     'https://www.brentozar.com/blitz/trace-flags-enabled-globally/',
@@ -17144,7 +17561,7 @@ BEGIN
             INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
             VALUES (@@SPID,
                     38,
-                    100,
+                    200,
                     'Backwards Scans',
                     'Indexes are being read backwards',
                     'https://www.brentozar.com/blitzcache/backwards-scans/',
@@ -17249,7 +17666,7 @@ BEGIN
              INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
              VALUES (@@SPID,
                      46,
-                     100,
+                     200,
                      'Plan Confusion',
                      'Row Level Security is in use',
                      'https://www.brentozar.com/blitzcache/row-level-security/',
@@ -17340,7 +17757,7 @@ BEGIN
              INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
              VALUES (@@SPID,
                      53,
-                     150,
+                     200,
                      'Adaptive joins',
                      'This is pretty cool -- you''re living in the future.',
                      'https://www.brentozar.com/blitzcache/adaptive-joins/',
@@ -17398,7 +17815,7 @@ BEGIN
                      'http://sqlblog.com/blogs/paul_white/archive/2013/06/11/hello-operator-my-switch-is-bored.aspx',
                      'You should email this query plan to Paul: SQLkiwi at gmail dot com') ;	
 
-		IF @v >= 14
+		IF @v >= 14 OR (@v = 13 AND @build >= 5026)
 			BEGIN	
 
 				INSERT INTO ##bou_BlitzCacheResults (SPID, CheckID, Priority, FindingsGroup, Finding, URL, Details)
@@ -17425,7 +17842,7 @@ BEGIN
                      200,
                      'Row Goals',
                      'This query had row goals introduced',
-                     'https://www.brentozar.com/archive/2018/01/sql-server-2017-cu3-adds-optimizer-row-goal-information-query-plans/',
+                     'https://www.brentozar.com/go/rowgoals/',
                      'This can be good or bad, and should be investigated for high read queries') ;	
 
         IF EXISTS (SELECT 1/0
@@ -17467,7 +17884,7 @@ BEGIN
                      100,
                      'Many to Many Merge',
                      'These use secret worktables that could be doing lots of reads',
-                     'link to blog post when published',
+                     'https://www.brentozar.com/archive/2018/04/many-mysteries-merge-joins/',
 					 'Occurs when join inputs aren''t known to be unique. Can be really bad when parallel.');	
 
         IF EXISTS (SELECT 1/0
@@ -17479,9 +17896,9 @@ BEGIN
                      62,
                      50,
                      'Non-SARGable queries',
-                     'Queries may be using',
-                     'link to blog post when published',
-					 'Occurs when join inputs aren''t known to be unique. Can be really bad when parallel.');	
+                     'Queries may have non-SARGable predicates',
+                     'http://brentozar.com/go/sargable',
+					 'Looks for intrinsic functions and expressions as predicates, and leading wildcard LIKE searches.');	
 
         IF EXISTS (SELECT 1/0
                    FROM   #plan_creation p
@@ -17565,7 +17982,7 @@ BEGIN
             URL,
             Details,
             CheckID
-    ORDER BY Priority ASC, CheckID ASC
+    ORDER BY Priority ASC, FindingsGroup, Finding, CheckID ASC
     OPTION (RECOMPILE);
 END;
 
@@ -17706,7 +18123,7 @@ IF OBJECT_ID('tempdb.. #bou_allsort') IS NULL
          CREATE TABLE #bou_allsort
          (
            Id INT IDENTITY(1, 1),
-           DatabaseName VARCHAR(128),
+           DatabaseName NVARCHAR(128),
            Cost FLOAT,
            QueryText NVARCHAR(MAX),
            QueryType NVARCHAR(258),
@@ -17770,7 +18187,7 @@ SELECT  @MemGrant = CASE WHEN (
                     END;
 
 DECLARE @Spills BIT;
-SELECT @Spills = CASE WHEN (@v >= 14) THEN 1 ELSE 0 END
+SELECT @Spills = CASE WHEN (@v >= 15 OR (@v = 14 AND @build >= 3015) OR (@v = 13 AND @build >= 5026)) THEN 1 ELSE 0 END;
 		 
 
 IF LOWER(@SortOrder) = 'all'
@@ -18162,7 +18579,7 @@ END; /*Final End*/
 
 GO
 IF OBJECT_ID('dbo.sp_BlitzFirst') IS NULL
-  EXEC ('CREATE PROCEDURE dbo.sp_BlitzFirst AS RETURN 0;')
+  EXEC ('CREATE PROCEDURE dbo.sp_BlitzFirst AS RETURN 0;');
 GO
 
 
@@ -18202,8 +18619,8 @@ BEGIN
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 DECLARE @Version VARCHAR(30);
-SET @Version = '6.3';
-SET @VersionDate = '20180301';
+SET @Version = '6.5';
+SET @VersionDate = '20180501';
 
 
 IF @Help = 1 PRINT '
@@ -18257,7 +18674,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-'
+';
 
 
 RAISERROR('Setting up configuration variables',10,1) WITH NOWAIT;
@@ -18273,11 +18690,15 @@ DECLARE @StringToExecute NVARCHAR(MAX),
     @StartSampleTime DATETIMEOFFSET,
     @FinishSampleTime DATETIMEOFFSET,
 	@FinishSampleTimeWaitFor DATETIME,
+	@AsOf1 DATETIMEOFFSET,
+	@AsOf2 DATETIMEOFFSET,
     @ServiceName sysname,
     @OutputTableNameFileStats_View NVARCHAR(256),
     @OutputTableNamePerfmonStats_View NVARCHAR(256),
+    @OutputTableNamePerfmonStatsActuals_View NVARCHAR(256),
     @OutputTableNameWaitStats_View NVARCHAR(256),
     @OutputTableNameWaitStats_Categories NVARCHAR(256),
+	@OutputTableCleanupDate DATE,
     @ObjectFullName NVARCHAR(2000),
 	@BlitzWho NVARCHAR(MAX) = N'EXEC dbo.sp_BlitzWho @ShowSleepingSPIDs = ' + CONVERT(NVARCHAR(1), @ShowSleepingSPIDs) + N';',
     @BlitzCacheMinutesBack INT,
@@ -18290,6 +18711,7 @@ DECLARE @StringToExecute NVARCHAR(MAX),
 SELECT
     @OutputTableNameFileStats_View = QUOTENAME(@OutputTableNameFileStats + '_Deltas'),
     @OutputTableNamePerfmonStats_View = QUOTENAME(@OutputTableNamePerfmonStats + '_Deltas'),
+    @OutputTableNamePerfmonStatsActuals_View = QUOTENAME(@OutputTableNamePerfmonStats + '_Actuals'),
     @OutputTableNameWaitStats_View = QUOTENAME(@OutputTableNameWaitStats + '_Deltas'),
     @OutputTableNameWaitStats_Categories = QUOTENAME(@OutputTableNameWaitStats + '_Categories');
 
@@ -18300,6 +18722,7 @@ SELECT
     @OutputTableNameFileStats = QUOTENAME(@OutputTableNameFileStats),
     @OutputTableNamePerfmonStats = QUOTENAME(@OutputTableNamePerfmonStats),
     @OutputTableNameWaitStats = QUOTENAME(@OutputTableNameWaitStats),
+	@OutputTableCleanupDate = CAST( (DATEADD(DAY, -1 * @OutputTableRetentionDays, GETDATE() ) ) AS DATE),
     /* @OutputTableNameBlitzCache = QUOTENAME(@OutputTableNameBlitzCache),  We purposely don't sanitize this because sp_BlitzCache will */
     @LineFeed = CHAR(13) + CHAR(10),
     @StartSampleTime = SYSDATETIMEOFFSET(),
@@ -18326,7 +18749,7 @@ IF @LogMessage IS NOT NULL
             IF @OutputDatabaseName IS NULL AND EXISTS (SELECT * FROM sys.databases WHERE name = 'DBAtools')
                 SET @OutputDatabaseName = '[DBAtools]';
 
-        END
+        END;
 
     IF @OutputDatabaseName IS NULL OR @OutputSchemaName IS NULL OR @OutputTableName IS NULL
             OR NOT EXISTS ( SELECT *
@@ -18335,7 +18758,7 @@ IF @LogMessage IS NOT NULL
 		BEGIN
         RAISERROR('We have a hard time logging a message without a valid @OutputDatabaseName, @OutputSchemaName, and @OutputTableName to log it to.', 0, 1) WITH NOWAIT;
 		RETURN;
-        END
+        END;
     IF @LogMessageCheckDate IS NULL
         SET @LogMessageCheckDate = SYSDATETIMEOFFSET();
     SET @StringToExecute = N' IF EXISTS(SELECT * FROM '
@@ -18345,18 +18768,17 @@ IF @LogMessage IS NOT NULL
         + @OutputDatabaseName + '.'
         + @OutputSchemaName + '.'
         + @OutputTableName
-        + ' (ServerName, CheckDate, CheckID, Priority, FindingsGroup, Finding, Details, URL) VALUES( '''
-        + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-        + ''', ''' + CONVERT(NVARCHAR(100), @LogMessageCheckDate, 121) + ''', @LogMessageCheckID, @LogMessagePriority, @LogMessageFindingsGroup, @LogMessageFinding, @LogMessage, @LogMessageURL)'
+        + ' (ServerName, CheckDate, CheckID, Priority, FindingsGroup, Finding, Details, URL) VALUES( '
+        + ' @SrvName, @CheckDate, @LogMessageCheckID, @LogMessagePriority, @LogMessageFindingsGroup, @LogMessageFinding, @LogMessage, @LogMessageURL)';
 
-    EXECUTE sp_executesql @StringToExecute, 
-        N'@LogMessageCheckID INT, @LogMessagePriority TINYINT, @LogMessageFindingsGroup VARCHAR(50), @LogMessageFinding VARCHAR(200), @LogMessage NVARCHAR(4000), @LogMessageCheckDate DATETIMEOFFSET, @LogMessageURL VARCHAR(200)',
-        @LogMessageCheckID, @LogMessagePriority, @LogMessageFindingsGroup, @LogMessageFinding, @LogMessage, @LogMessageCheckDate, @LogMessageURL;
+    EXECUTE sp_executesql @StringToExecute,
+        N'@SrvName NVARCHAR(128), @CheckDate datetimeoffset, @LogMessageCheckID INT, @LogMessagePriority TINYINT, @LogMessageFindingsGroup VARCHAR(50), @LogMessageFinding VARCHAR(200), @LogMessage NVARCHAR(4000), @LogMessageCheckDate DATETIMEOFFSET, @LogMessageURL VARCHAR(200)',
+        @@SERVERNAME, @StartSampleTime, @LogMessageCheckID, @LogMessagePriority, @LogMessageFindingsGroup, @LogMessageFinding, @LogMessage, @LogMessageCheckDate, @LogMessageURL;
 
     RAISERROR('LogMessage saved to table. We have made a note of your activity. Keep up the good work.',10,1) WITH NOWAIT;
 
     RETURN;
-    END
+    END;
 
 IF @SinceStartup = 1
     SELECT @Seconds = 0, @ExpertMode = 1;
@@ -18365,7 +18787,7 @@ IF @Seconds = 0 AND CAST(SERVERPROPERTY('edition') AS VARCHAR(100)) = 'SQL Azure
     SELECT @StartSampleTime = DATEADD(ms, AVG(-wait_time_ms), SYSDATETIMEOFFSET()), @FinishSampleTime = SYSDATETIMEOFFSET()
         FROM sys.dm_os_wait_stats w
         WHERE wait_type IN ('BROKER_TASK_STOP','DIRTY_PAGE_POLL','HADR_FILESTREAM_IOMGR_IOCOMPLETION','LAZYWRITER_SLEEP',
-                            'LOGMGR_QUEUE','REQUEST_FOR_DEADLOCK_SEARCH','XE_DISPATCHER_WAIT','XE_TIMER_EVENT')
+                            'LOGMGR_QUEUE','REQUEST_FOR_DEADLOCK_SEARCH','XE_DISPATCHER_WAIT','XE_TIMER_EVENT');
 ELSE IF @Seconds = 0 AND CAST(SERVERPROPERTY('edition') AS VARCHAR(100)) <> 'SQL Azure'
     SELECT @StartSampleTime = DATEADD(MINUTE,DATEDIFF(MINUTE, GETDATE(), GETUTCDATE()),create_date) , @FinishSampleTime = SYSDATETIMEOFFSET()
         FROM sys.databases
@@ -18375,12 +18797,14 @@ ELSE
 
 IF @OutputType = 'SCHEMA'
 BEGIN
-    SELECT FieldList = '[Priority] TINYINT, [FindingsGroup] VARCHAR(50), [Finding] VARCHAR(200), [URL] VARCHAR(200), [Details] NVARCHAR(4000), [HowToStopIt] NVARCHAR(MAX), [QueryPlan] XML, [QueryText] NVARCHAR(MAX)'
+    SELECT FieldList = '[Priority] TINYINT, [FindingsGroup] VARCHAR(50), [Finding] VARCHAR(200), [URL] VARCHAR(200), [Details] NVARCHAR(4000), [HowToStopIt] NVARCHAR(MAX), [QueryPlan] XML, [QueryText] NVARCHAR(MAX)';
 
-END
+END;
 ELSE IF @AsOf IS NOT NULL AND @OutputDatabaseName IS NOT NULL AND @OutputSchemaName IS NOT NULL AND @OutputTableName IS NOT NULL
 BEGIN
     /* They want to look into the past. */
+        SET @AsOf1= DATEADD(mi, -15, @AsOf);
+		SET @AsOf2= DATEADD(mi, +15, @AsOf);
 
         SET @StringToExecute = N' IF EXISTS(SELECT * FROM '
             + @OutputDatabaseName
@@ -18391,13 +18815,15 @@ BEGIN
             + @OutputDatabaseName + '.'
             + @OutputSchemaName + '.'
             + @OutputTableName
-            + ' WHERE CheckDate >= DATEADD(mi, -15, CONVERT(DATETIMEOFFSET, ''' + CAST(@AsOf AS NVARCHAR(100)) + '''))'
-            + ' AND CheckDate <= DATEADD(mi, 15, CONVERT(DATETIMEOFFSET, ''' + CAST(@AsOf AS NVARCHAR(100)) + '''))'
+            + ' WHERE CheckDate >= @AsOf1'
+            + ' AND CheckDate <= @AsOf2'
             + ' /*ORDER BY CheckDate, Priority , FindingsGroup , Finding , Details*/;';
-		EXEC(@StringToExecute);
+		EXEC sp_executesql @StringToExecute,
+			N'@AsOf1 DATETIMEOFFSET, @AsOf2 DATETIMEOFFSET',
+			@AsOf1, @AsOf2
 
 
-END /* IF @AsOf IS NOT NULL AND @OutputDatabaseName IS NOT NULL AND @OutputSchemaName IS NOT NULL AND @OutputTableName IS NOT NULL */
+END; /* IF @AsOf IS NOT NULL AND @OutputDatabaseName IS NOT NULL AND @OutputSchemaName IS NOT NULL AND @OutputTableName IS NOT NULL */
 ELSE IF @LogMessage IS NULL /* IF @OutputType = 'SCHEMA' */
 BEGIN
     /* What's running right now? This is the first and last result set. */
@@ -18405,13 +18831,13 @@ BEGIN
     BEGIN
 		IF OBJECT_ID('master.dbo.sp_BlitzWho') IS NULL AND OBJECT_ID('dbo.sp_BlitzWho') IS NULL
 		BEGIN
-			PRINT N'sp_BlitzWho is not installed in the current database_files.  You can get a copy from http://FirstResponderKit.org'
-		END
+			PRINT N'sp_BlitzWho is not installed in the current database_files.  You can get a copy from http://FirstResponderKit.org';
+		END;
 		ELSE
 		BEGIN
-			EXEC (@BlitzWho)
-		END
-    END /* IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1   -   What's running right now? This is the first and last result set. */
+			EXEC (@BlitzWho);
+		END;
+    END; /* IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1   -   What's running right now? This is the first and last result set. */
      
 
     RAISERROR('Now starting diagnostic analysis',10,1) WITH NOWAIT;
@@ -18547,7 +18973,7 @@ BEGIN
 				WaitCategory NVARCHAR(128) NOT NULL,
 				Ignorable BIT DEFAULT 0
 			);
-		END /* IF OBJECT_ID('tempdb..##WaitCategories') IS NULL */
+		END; /* IF OBJECT_ID('tempdb..##WaitCategories') IS NULL */
 
 	IF 504 <> (SELECT COALESCE(SUM(1),0) FROM ##WaitCategories)
 		BEGIN
@@ -18599,7 +19025,9 @@ BEGIN
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('DBMIRROR_WORKER_QUEUE','Mirroring',1);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('DBMIRRORING_CMD','Mirroring',1);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('DIRTY_PAGE_POLL','Other',1);
+			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('DIRTY_PAGE_TABLE_LOCK','Replication',0);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('DISPATCHER_QUEUE_SEMAPHORE','Other',1);
+			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('DPT_ENTRY_LOCK','Replication',0);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('DTC','Transaction',0);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('DTC_ABORT_REQUEST','Transaction',0);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('DTC_RESOLVE','Transaction',0);
@@ -18789,6 +19217,13 @@ BEGIN
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PAGELATCH_NL','Buffer Latch',0);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PAGELATCH_SH','Buffer Latch',0);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PAGELATCH_UP','Buffer Latch',0);
+			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PARALLEL_REDO_DRAIN_WORKER','Replication',1);
+			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PARALLEL_REDO_FLOW_CONTROL','Replication',0);
+			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PARALLEL_REDO_LOG_CACHE','Replication',1);
+			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PARALLEL_REDO_TRAN_LIST','Replication',1);
+			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PARALLEL_REDO_TRAN_TURN','Replication',1);
+			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PARALLEL_REDO_WORKER_SYNC','Replication',1);
+			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PARALLEL_REDO_WORKER_WAIT_WORK','Replication',1);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('POOL_LOG_RATE_GOVERNOR','Log Rate Governor',0);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PREEMPTIVE_ABR','Preemptive',0);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('PREEMPTIVE_CLOSEBACKUPMEDIA','Preemptive',0);
@@ -19068,7 +19503,7 @@ BEGIN
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('XE_DISPATCHER_WAIT','Idle',1);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('XE_LIVE_TARGET_TVF','Other',1);
 			INSERT INTO ##WaitCategories(WaitType, WaitCategory, Ignorable) VALUES ('XE_TIMER_EVENT','Idle',1);
-		END /* IF SELECT SUM(1) FROM ##WaitCategories <> 504 */
+		END; /* IF SELECT SUM(1) FROM ##WaitCategories <> 504 */
 
 
 
@@ -19077,9 +19512,9 @@ BEGIN
     CREATE TABLE #MasterFiles (database_id INT, file_id INT, type_desc NVARCHAR(50), name NVARCHAR(255), physical_name NVARCHAR(255), size BIGINT);
     /* Azure SQL Database doesn't have sys.master_files, so we have to build our own. */
     IF CAST(SERVERPROPERTY('edition') AS VARCHAR(100)) = 'SQL Azure'
-        SET @StringToExecute = 'INSERT INTO #MasterFiles (database_id, file_id, type_desc, name, physical_name, size) SELECT DB_ID(), file_id, type_desc, name, physical_name, size FROM sys.database_files;'
+        SET @StringToExecute = 'INSERT INTO #MasterFiles (database_id, file_id, type_desc, name, physical_name, size) SELECT DB_ID(), file_id, type_desc, name, physical_name, size FROM sys.database_files;';
     ELSE
-        SET @StringToExecute = 'INSERT INTO #MasterFiles (database_id, file_id, type_desc, name, physical_name, size) SELECT database_id, file_id, type_desc, name, physical_name, size FROM sys.master_files;'
+        SET @StringToExecute = 'INSERT INTO #MasterFiles (database_id, file_id, type_desc, name, physical_name, size) SELECT database_id, file_id, type_desc, name, physical_name, size FROM sys.master_files;';
     EXEC(@StringToExecute);
 
     IF @FilterPlansByDatabase IS NOT NULL
@@ -19089,8 +19524,8 @@ BEGIN
             INSERT INTO #FilterPlansByDatabase (DatabaseID)
             SELECT database_id
                 FROM sys.databases
-                WHERE [name] NOT IN ('master', 'model', 'msdb', 'tempdb')
-            END
+                WHERE [name] NOT IN ('master', 'model', 'msdb', 'tempdb');
+            END;
         ELSE
             BEGIN
             SET @FilterPlansByDatabase = @FilterPlansByDatabase + ','
@@ -19106,9 +19541,9 @@ BEGIN
                 SELECT SUBSTRING(@FilterPlansByDatabase, f, t - f)
                 FROM a
                 WHERE SUBSTRING(@FilterPlansByDatabase, f, t - f) IS NOT NULL
-                OPTION (MAXRECURSION 0)
-            END
-        END
+                OPTION (MAXRECURSION 0);
+            END;
+        END;
 
 
     SET @StockWarningHeader = '<?ClickToSeeCommmand -- ' + @LineFeed + @LineFeed
@@ -19127,11 +19562,11 @@ BEGIN
         FROM sys.dm_os_performance_counters;
     ELSE
         BEGIN
-        SET @StringToExecute = 'INSERT INTO #PerfmonStats(object_name, Pass, SampleTime, counter_name, cntr_type) SELECT CASE WHEN @@SERVICENAME = ''MSSQLSERVER'' THEN ''SQLServer'' ELSE ''MSSQL$'' + @@SERVICENAME END, 0, SYSDATETIMEOFFSET(), ''stuffing'', 0 ;'
+        SET @StringToExecute = 'INSERT INTO #PerfmonStats(object_name, Pass, SampleTime, counter_name, cntr_type) SELECT CASE WHEN @@SERVICENAME = ''MSSQLSERVER'' THEN ''SQLServer'' ELSE ''MSSQL$'' + @@SERVICENAME END, 0, SYSDATETIMEOFFSET(), ''stuffing'', 0 ;';
         EXEC(@StringToExecute);
         SELECT @ServiceName = object_name FROM #PerfmonStats;
         DELETE #PerfmonStats;
-        END
+        END;
 
     /* Build a list of queries that were run in the last 10 seconds.
        We're looking for the death-by-a-thousand-small-cuts scenario
@@ -19153,7 +19588,7 @@ BEGIN
 											SELECT [sql_handle], 1 AS Pass, SYSDATETIMEOFFSET(), statement_start_offset, statement_end_offset, plan_generation_num, plan_handle, execution_count, total_worker_time, total_physical_reads, total_logical_writes, total_logical_reads, total_clr_time, total_elapsed_time, creation_time, NULL AS query_hash, NULL AS query_plan_hash, 0
 											FROM sys.dm_exec_query_stats qs
 											WHERE qs.last_execution_time >= (DATEADD(ss, -10, SYSDATETIMEOFFSET()));';
-				END
+				END;
 			ELSE
 				BEGIN
 				SET @StringToExecute = N'INSERT INTO #QueryStats ([sql_handle], Pass, SampleTime, statement_start_offset, statement_end_offset, plan_generation_num, plan_handle, execution_count, total_worker_time, total_physical_reads, total_logical_writes, total_logical_reads, total_clr_time, total_elapsed_time, creation_time, query_hash, query_plan_hash, Points)
@@ -19163,8 +19598,8 @@ BEGIN
 												INNER JOIN #FilterPlansByDatabase dbs ON CAST(attr.value AS INT) = dbs.DatabaseID
 											WHERE qs.last_execution_time >= (DATEADD(ss, -10, SYSDATETIMEOFFSET()))
 												AND attr.attribute = ''dbid'';';
-				END
-			END
+				END;
+			END;
 		ELSE
 			BEGIN
 			IF @FilterPlansByDatabase IS NULL
@@ -19173,7 +19608,7 @@ BEGIN
 											SELECT [sql_handle], 1 AS Pass, SYSDATETIMEOFFSET(), statement_start_offset, statement_end_offset, plan_generation_num, plan_handle, execution_count, total_worker_time, total_physical_reads, total_logical_writes, total_logical_reads, total_clr_time, total_elapsed_time, creation_time, query_hash, query_plan_hash, 0
 											FROM sys.dm_exec_query_stats qs
 											WHERE qs.last_execution_time >= (DATEADD(ss, -10, SYSDATETIMEOFFSET()));';
-				END
+				END;
 			ELSE
 				BEGIN
 				SET @StringToExecute = N'INSERT INTO #QueryStats ([sql_handle], Pass, SampleTime, statement_start_offset, statement_end_offset, plan_generation_num, plan_handle, execution_count, total_worker_time, total_physical_reads, total_logical_writes, total_logical_reads, total_clr_time, total_elapsed_time, creation_time, query_hash, query_plan_hash, Points)
@@ -19183,15 +19618,15 @@ BEGIN
 											INNER JOIN #FilterPlansByDatabase dbs ON CAST(attr.value AS INT) = dbs.DatabaseID
 											WHERE qs.last_execution_time >= (DATEADD(ss, -10, SYSDATETIMEOFFSET()))
 												AND attr.attribute = ''dbid'';';
-				END
-			END
+				END;
+			END;
 		EXEC(@StringToExecute);
 
 		/* Get the totals for the entire plan cache */
 		INSERT INTO #QueryStats (Pass, SampleTime, execution_count, total_worker_time, total_physical_reads, total_logical_writes, total_logical_reads, total_clr_time, total_elapsed_time, creation_time)
 		SELECT -1 AS Pass, SYSDATETIMEOFFSET(), SUM(execution_count), SUM(total_worker_time), SUM(total_physical_reads), SUM(total_logical_writes), SUM(total_logical_reads), SUM(total_clr_time), SUM(total_elapsed_time), MIN(creation_time)
 			FROM sys.dm_exec_query_stats qs;
-    END /*IF @CheckProcedureCache = 1 */
+    END; /*IF @CheckProcedureCache = 1 */
 
 
     IF EXISTS (SELECT *
@@ -19201,114 +19636,114 @@ BEGIN
                     INNER JOIN tempdb.sys.all_columns col3 ON obj.object_id = col3.object_id AND col3.name = 'instance_name'
                     WHERE obj.name LIKE '%CustomPerfmonCounters%')
         BEGIN
-        SET @StringToExecute = 'INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) SELECT [object_name],[counter_name],[instance_name] FROM #CustomPerfmonCounters'
+        SET @StringToExecute = 'INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) SELECT [object_name],[counter_name],[instance_name] FROM #CustomPerfmonCounters';
         EXEC(@StringToExecute);
-        END
+        END;
     ELSE
         BEGIN
         /* Add our default Perfmon counters */
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Forwarded Records/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Page compression attempts/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Page Splits/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Skipped Ghosted Records/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Table Lock Escalations/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Worktables Created/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Page life expectancy', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Page reads/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Page writes/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Readahead pages/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Target pages', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Total pages', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Active Transactions','_Total')
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','Log Growths', '_Total')
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','Log Shrinks', '_Total')
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','Transactions/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','Write Transactions/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','XTP Memory Used (KB)',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Exec Statistics','Distributed Query', 'Execs in progress')
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Exec Statistics','DTC calls', 'Execs in progress')
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Exec Statistics','Extended Procedures', 'Execs in progress')
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Exec Statistics','OLEDB calls', 'Execs in progress')
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','Active Temp Tables', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','Logins/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','Logouts/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','Mars Deadlocks', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','Processes blocked', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Number of Deadlocks/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Memory Manager','Memory Grants Pending', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Errors','Errors/sec', '_Total')
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Batch Requests/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Forced Parameterizations/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Guided plan executions/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','SQL Attention rate', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','SQL Compilations/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','SQL Re-Compilations/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Workload Group Stats','Query optimizations/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Workload Group Stats','Suboptimal plans/sec',NULL)
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Forwarded Records/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Page compression attempts/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Page Splits/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Skipped Ghosted Records/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Table Lock Escalations/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Worktables Created/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Page life expectancy', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Page reads/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Page writes/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Readahead pages/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Target pages', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Total pages', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Active Transactions','_Total');
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','Log Growths', '_Total');
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','Log Shrinks', '_Total');
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','Transactions/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','Write Transactions/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Databases','XTP Memory Used (KB)',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Exec Statistics','Distributed Query', 'Execs in progress');
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Exec Statistics','DTC calls', 'Execs in progress');
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Exec Statistics','Extended Procedures', 'Execs in progress');
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Exec Statistics','OLEDB calls', 'Execs in progress');
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','Active Temp Tables', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','Logins/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','Logouts/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','Mars Deadlocks', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','Processes blocked', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Number of Deadlocks/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Memory Manager','Memory Grants Pending', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Errors','Errors/sec', '_Total');
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Batch Requests/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Forced Parameterizations/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Guided plan executions/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','SQL Attention rate', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','SQL Compilations/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','SQL Re-Compilations/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Workload Group Stats','Query optimizations/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Workload Group Stats','Suboptimal plans/sec',NULL);
         /* Below counters added by Jefferson Elias */
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Worktables From Cache Base',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Worktables From Cache Ratio',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Database pages',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Free pages',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Stolen pages',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Memory Manager','Granted Workspace Memory (KB)',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Memory Manager','Maximum Workspace Memory (KB)',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Memory Manager','Target Server Memory (KB)',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Memory Manager','Total Server Memory (KB)',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Buffer cache hit ratio',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Buffer cache hit ratio base',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Checkpoint pages/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Free list stalls/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Lazy writes/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Auto-Param Attempts/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Failed Auto-Params/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Safe Auto-Params/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Unsafe Auto-Params/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Workfiles Created/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','User Connections',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Latches','Average Latch Wait Time (ms)',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Latches','Average Latch Wait Time Base',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Latches','Latch Waits/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Latches','Total Latch Wait Time (ms)',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Average Wait Time (ms)',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Average Wait Time Base',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Lock Requests/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Lock Timeouts/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Lock Wait Time (ms)',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Lock Waits/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Transactions','Longest Transaction Running Time',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Full Scans/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Index Searches/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Page lookups/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Cursor Manager by Type','Active cursors',NULL)
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Worktables From Cache Base',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Worktables From Cache Ratio',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Database pages',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Free pages',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Stolen pages',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Memory Manager','Granted Workspace Memory (KB)',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Memory Manager','Maximum Workspace Memory (KB)',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Memory Manager','Target Server Memory (KB)',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Memory Manager','Total Server Memory (KB)',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Buffer cache hit ratio',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Buffer cache hit ratio base',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Checkpoint pages/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Free list stalls/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Lazy writes/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Auto-Param Attempts/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Failed Auto-Params/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Safe Auto-Params/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','Unsafe Auto-Params/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Workfiles Created/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':General Statistics','User Connections',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Latches','Average Latch Wait Time (ms)',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Latches','Average Latch Wait Time Base',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Latches','Latch Waits/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Latches','Total Latch Wait Time (ms)',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Average Wait Time (ms)',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Average Wait Time Base',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Lock Requests/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Lock Timeouts/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Lock Wait Time (ms)',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Locks','Lock Waits/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Transactions','Longest Transaction Running Time',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Full Scans/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Access Methods','Index Searches/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Buffer Manager','Page lookups/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':Cursor Manager by Type','Active cursors',NULL);
         /* Below counters are for In-Memory OLTP (Hekaton), which have a different naming convention.
            And yes, they actually hard-coded the version numbers into the counters.
            For why, see: https://connect.microsoft.com/SQLServer/feedback/details/817216/xtp-perfmon-counters-should-appear-under-sql-server-perfmon-counter-group
         */
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Cursors','Expired rows removed/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Cursors','Expired rows touched/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Garbage Collection','Rows processed/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP IO Governor','Io Issued/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Phantom Processor','Phantom expired rows touched/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Phantom Processor','Phantom rows touched/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Transaction Log','Log bytes written/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Transaction Log','Log records written/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Transactions','Transactions aborted by user/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Transactions','Transactions aborted/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Transactions','Transactions created/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Cursors','Expired rows removed/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Cursors','Expired rows touched/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Garbage Collection','Rows processed/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP IO Governor','Io Issued/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Phantom Processor','Phantom expired rows touched/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Phantom Processor','Phantom rows touched/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Transaction Log','Log bytes written/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Transaction Log','Log records written/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Transactions','Transactions aborted by user/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Transactions','Transactions aborted/sec',NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Transactions','Transactions created/sec',NULL)
-        END
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Cursors','Expired rows removed/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Cursors','Expired rows touched/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Garbage Collection','Rows processed/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP IO Governor','Io Issued/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Phantom Processor','Phantom expired rows touched/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Phantom Processor','Phantom rows touched/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Transaction Log','Log bytes written/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Transaction Log','Log records written/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Transactions','Transactions aborted by user/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Transactions','Transactions aborted/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2014 XTP Transactions','Transactions created/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Cursors','Expired rows removed/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Cursors','Expired rows touched/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Garbage Collection','Rows processed/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP IO Governor','Io Issued/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Phantom Processor','Phantom expired rows touched/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Phantom Processor','Phantom rows touched/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Transaction Log','Log bytes written/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Transaction Log','Log records written/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Transactions','Transactions aborted by user/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Transactions','Transactions aborted/sec',NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES ('SQL Server 2016 XTP Transactions','Transactions created/sec',NULL);
+        END;
 
     /* Populate #FileStats, #PerfmonStats, #WaitStats with DMV data.
         After we finish doing our checks, we'll take another sample and compare them. */
@@ -19422,7 +19857,7 @@ BEGIN
         FROM #PerfmonCounters counters
         INNER JOIN sys.dm_os_performance_counters dmv ON counters.counter_name COLLATE SQL_Latin1_General_CP1_CI_AS = RTRIM(dmv.counter_name) COLLATE SQL_Latin1_General_CP1_CI_AS
             AND counters.[object_name] COLLATE SQL_Latin1_General_CP1_CI_AS = RTRIM(dmv.[object_name]) COLLATE SQL_Latin1_General_CP1_CI_AS
-            AND (counters.[instance_name] IS NULL OR counters.[instance_name] COLLATE SQL_Latin1_General_CP1_CI_AS = RTRIM(dmv.[instance_name]) COLLATE SQL_Latin1_General_CP1_CI_AS)
+            AND (counters.[instance_name] IS NULL OR counters.[instance_name] COLLATE SQL_Latin1_General_CP1_CI_AS = RTRIM(dmv.[instance_name]) COLLATE SQL_Latin1_General_CP1_CI_AS);
 
 	RAISERROR('Beginning investigatory queries',10,1) WITH NOWAIT;
 
@@ -19466,7 +19901,7 @@ BEGIN
     BEGIN
         SET @StringToExecute = 'UPDATE #BlitzFirstResults SET Details = Details + '' Over the last 60 days, the full backup usually takes '' + CAST((SELECT AVG(DATEDIFF(mi, bs.backup_start_date, bs.backup_finish_date)) FROM msdb.dbo.backupset bs WHERE abr.DatabaseName = bs.database_name AND bs.type = ''D'' AND bs.backup_start_date > DATEADD(dd, -60, SYSDATETIMEOFFSET()) AND bs.backup_finish_date IS NOT NULL) AS NVARCHAR(100)) + '' minutes.'' FROM #BlitzFirstResults abr WHERE abr.CheckID = 1 AND EXISTS (SELECT * FROM msdb.dbo.backupset bs WHERE bs.type = ''D'' AND bs.backup_start_date > DATEADD(dd, -60, SYSDATETIMEOFFSET()) AND bs.backup_finish_date IS NOT NULL AND abr.DatabaseName = bs.database_name AND DATEDIFF(mi, bs.backup_start_date, bs.backup_finish_date) > 1)';
         EXEC(@StringToExecute);
-    END
+    END;
 
 
     /* Maintenance Tasks Running - DBCC CHECK* Running - CheckID 2 */
@@ -19560,7 +19995,7 @@ BEGIN
     INNER JOIN sys.dm_exec_requests r ON t.session_id = r.session_id
     INNER JOIN sys.dm_exec_sessions s ON r.session_id = s.session_id
     CROSS APPLY sys.dm_exec_query_plan(r.plan_handle) pl
-    WHERE t.wait_type = 'PREEMPTIVE_OS_WRITEFILEGATHER'
+    WHERE t.wait_type = 'PREEMPTIVE_OS_WRITEFILEGATHER';
 
 
     /* Query Problems - Long-Running Query Blocking Others - CheckID 5 */
@@ -19593,9 +20028,9 @@ BEGIN
 	        INNER JOIN sys.dm_exec_sessions s ON tBlocked.blocking_session_id = s.session_id
             LEFT OUTER JOIN sys.dm_exec_requests r ON s.session_id = r.session_id
             INNER JOIN sys.dm_exec_connections c ON s.session_id = c.session_id
-            WHERE tBlocked.wait_type LIKE ''LCK%'' AND tBlocked.wait_duration_ms > 30000;'
+            WHERE tBlocked.wait_type LIKE ''LCK%'' AND tBlocked.wait_duration_ms > 30000;';
 		EXECUTE sp_executesql @StringToExecute;
-    END
+    END;
 
     /* Query Problems - Plan Cache Erased Recently */
     IF DATEADD(mi, -15, SYSDATETIME()) < (SELECT TOP 1 creation_time FROM sys.dm_exec_query_stats ORDER BY creation_time)
@@ -19613,7 +20048,7 @@ BEGIN
                 + 'plans and put them in cache again. This causes high CPU loads.' AS Details,
             'Find who did that, and stop them from doing it again.' AS HowToStopIt
         FROM sys.dm_exec_query_stats
-        ORDER BY creation_time
+        ORDER BY creation_time;
     END;
 
 
@@ -19649,8 +20084,47 @@ BEGIN
     WHERE s.status = 'sleeping'
     AND s.last_request_end_time < DATEADD(ss, -10, SYSDATETIME())
     AND EXISTS(SELECT * FROM sys.dm_tran_locks WHERE request_session_id = s.session_id
-    AND NOT (resource_type = N'DATABASE' AND request_mode = N'S' AND request_status = N'GRANT' AND request_owner_type = N'SHARED_TRANSACTION_WORKSPACE'))
+    AND NOT (resource_type = N'DATABASE' AND request_mode = N'S' AND request_status = N'GRANT' AND request_owner_type = N'SHARED_TRANSACTION_WORKSPACE'));
 
+
+    /*Query Problems - Clients using implicit transactions */
+    IF @Seconds > 0 
+		AND ( @@VERSION NOT LIKE 'Microsoft SQL Server 2005%'
+		AND	  @@VERSION NOT LIKE 'Microsoft SQL Server 2008%'
+		AND	  @@VERSION NOT LIKE 'Microsoft SQL Server 2008 R2%' )
+     BEGIN
+        SET @StringToExecute = N'INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, StartTime, LoginName, NTUserName, ProgramName, HostName, DatabaseID, DatabaseName, QueryText, OpenTransactionCount)
+		SELECT  37 AS CheckId,
+		        50 AS Priority,
+		        ''Implicit Transactions'' AS FindingsGroup,
+		        ''Queries were found running using implicit transactions'',
+		        ''https://www.brentozar.com/go/ImplicitTransactions/'' AS URL,
+		        ''Database: '' + DB_NAME(s.database_id)  + '' '' + 
+				''Host: '' + s.[host_name]  + '' '' + 
+				''Program: '' + s.[program_name]  + '' '' + 
+				CONVERT(NVARCHAR(10), s.open_transaction_count) + 
+				'' open transactions since: '' + 
+				CONVERT(NVARCHAR(30), tat.transaction_begin_time) + ''. '' 
+					AS Details,
+				''Check client configuration options'' AS HowToStopit,
+		        tat.transaction_begin_time,
+		        s.login_name,
+		        s.nt_user_name,
+		        s.program_name,
+		        s.host_name,
+		        s.database_id,
+		        DB_NAME(s.database_id) AS DatabaseName,
+		        NULL AS Querytext,
+		        s.open_transaction_count AS OpenTransactionCount
+		FROM    sys.dm_tran_active_transactions AS tat
+		LEFT JOIN sys.dm_tran_session_transactions AS tst
+		ON tst.transaction_id = tat.transaction_id
+		LEFT JOIN sys.dm_exec_sessions AS s
+		ON s.session_id = tst.session_id
+		WHERE tat.name = ''implicit_transaction'';
+		'
+		EXECUTE sp_executesql @StringToExecute;
+    END;
 
     /* Query Problems - Query Rolling Back - CheckID 9 */
     IF @Seconds > 0
@@ -19680,7 +20154,7 @@ BEGIN
         AND     request_mode = N'S'
         AND     request_status = N'GRANT'
         AND     request_owner_type = N'SHARED_TRANSACTION_WORKSPACE') AS db ON s.session_id = db.request_session_id
-    WHERE r.status = 'rollback'
+    WHERE r.status = 'rollback';
 
 
     /* Server Performance - Page Life Expectancy Low - CheckID 10 */
@@ -19697,7 +20171,7 @@ BEGIN
     FROM sys.dm_os_performance_counters c
     WHERE object_name LIKE 'SQLServer:Buffer Manager%'
     AND counter_name LIKE 'Page life expectancy%'
-    AND cntr_value < 300
+    AND cntr_value < 300;
 
     /* Server Performance - Too Much Free Memory - CheckID 34 */
     INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt)
@@ -19713,7 +20187,7 @@ BEGIN
 			AND cTotal.counter_name = N'Total Server Memory (KB)                                                                                                        '
 		WHERE cFree.object_name LIKE N'%Memory Manager%'
 			AND cFree.counter_name = N'Free Memory (KB)                                                                                                                '
-			AND CAST(cTotal.cntr_value AS BIGINT) > 20480000000
+			AND CAST(cFree.cntr_value AS BIGINT) > 20480000000
 			AND CAST(cTotal.cntr_value AS BIGINT) * .3 <= CAST(cFree.cntr_value AS BIGINT)
             AND CAST(SERVERPROPERTY('edition') AS VARCHAR(100)) NOT LIKE '%Standard%';
 
@@ -19745,7 +20219,7 @@ BEGIN
         SUM (CAST(size AS BIGINT))*8./1024./1024. AS DetailsInt,
         'http://www.BrentOzar.com/askbrent/' AS URL
     FROM #MasterFiles
-    WHERE database_id > 4
+    WHERE database_id > 4;
 
     /* Server Info - Database Count - CheckID 22 */
     INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, Details, DetailsInt, URL)
@@ -19757,7 +20231,7 @@ BEGIN
         SUM (1) AS DetailsInt,
         'http://www.BrentOzar.com/askbrent/' AS URL
     FROM sys.databases
-    WHERE database_id > 4
+    WHERE database_id > 4;
 
     /* Server Performance - High CPU Utilization CheckID 24 */
     IF @Seconds < 30
@@ -19778,20 +20252,46 @@ BEGIN
                     AND record LIKE '%<SystemHealth>%'
                     ORDER BY timestamp DESC) AS rb
             ) AS y
-            WHERE 100 - SystemIdle >= 50
+            WHERE 100 - SystemIdle >= 50;
 
-        INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, Details, DetailsInt, URL)
-        SELECT 23, 250, 'Server Info', 'CPU Utilization', CAST(100 - SystemIdle AS NVARCHAR(20)) + N'%. Ring buffer details: ' + CAST(record AS NVARCHAR(4000)), 100 - SystemIdle, 'http://www.BrentOzar.com/go/cpu'
-            FROM (
-                SELECT record,
-                    record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') AS SystemIdle
-                FROM (
-                    SELECT TOP 1 CONVERT(XML, record) AS record
-                    FROM sys.dm_os_ring_buffers
-                    WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
-                    AND record LIKE '%<SystemHealth>%'
-                    ORDER BY timestamp DESC) AS rb
-            ) AS y
+		WITH y
+		    AS
+		     (
+		         SELECT      CONVERT(VARCHAR(5), 100 - ca.c.value('.', 'INT')) AS system_idle,
+		                     CONVERT(VARCHAR(30), rb.event_date) AS event_date,
+		                     CONVERT(VARCHAR(8000), rb.record) AS record
+		         FROM
+		                     (   SELECT CONVERT(XML, dorb.record) AS record,
+		                                DATEADD(ms, ( ts.ms_ticks - dorb.timestamp ), GETDATE()) AS event_date
+		                         FROM   sys.dm_os_ring_buffers AS dorb
+		                         CROSS JOIN
+		                                ( SELECT dosi.ms_ticks FROM sys.dm_os_sys_info AS dosi ) AS ts
+		                         WHERE  dorb.ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+		                         AND    record LIKE '%<SystemHealth>%' ) AS rb
+		         CROSS APPLY rb.record.nodes('/Record/SchedulerMonitorEvent/SystemHealth/SystemIdle') AS ca(c)
+		     )
+		INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, Details, DetailsInt, URL, HowToStopIt)
+		SELECT TOP 1 
+				23, 
+				250, 
+				'Server Info', 
+				'CPU Utilization', 
+				y.system_idle + N'%. Ring buffer details: ' + CAST(y.record AS NVARCHAR(4000)), 
+				y.system_idle	, 
+				'http://www.BrentOzar.com/go/cpu',
+				STUFF(( SELECT TOP 2147483647
+						  CHAR(10) + CHAR(13)
+						+ y2.system_idle 
+						+ '% ON ' 
+						+ y2.event_date 
+						+ ' Ring buffer details:  '
+						+ y2.record
+		        FROM   y AS y2
+				ORDER BY y2.event_date DESC
+		        FOR XML PATH(N''), TYPE ).value(N'.[1]', N'VARCHAR(MAX)'), 1, 1, N'') AS query
+		FROM   y
+		ORDER BY y.event_date DESC;
+
 		
 		/* Highlight if non SQL processes are using >25% CPU */
 		INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, Details, DetailsInt, URL)
@@ -19807,9 +20307,9 @@ BEGIN
                     AND record LIKE '%<SystemHealth>%'
                     ORDER BY timestamp DESC) AS rb
             ) AS y
-            WHERE 100 - (y.SQLUsage + y.SystemIdle) >= 25
+            WHERE 100 - (y.SQLUsage + y.SystemIdle) >= 25;
 		
-        END /* IF @Seconds < 30 */
+        END; /* IF @Seconds < 30 */
 
 	RAISERROR('Finished running investigatory queries',10,1) WITH NOWAIT;
 
@@ -19819,7 +20319,7 @@ BEGIN
         BEGIN
         RAISERROR('Waiting to match @Seconds parameter',10,1) WITH NOWAIT;
         WAITFOR TIME @FinishSampleTimeWaitFor;
-        END
+        END;
 
 	RAISERROR('Capturing second pass of wait stats, perfmon counters, file stats',10,1) WITH NOWAIT;
     /* Populate #FileStats, #PerfmonStats, #WaitStats with DMV data. In a second, we'll compare these. */
@@ -19933,20 +20433,20 @@ BEGIN
         FROM #PerfmonCounters counters
         INNER JOIN sys.dm_os_performance_counters dmv ON counters.counter_name COLLATE SQL_Latin1_General_CP1_CI_AS = RTRIM(dmv.counter_name) COLLATE SQL_Latin1_General_CP1_CI_AS
             AND counters.[object_name] COLLATE SQL_Latin1_General_CP1_CI_AS = RTRIM(dmv.[object_name]) COLLATE SQL_Latin1_General_CP1_CI_AS
-            AND (counters.[instance_name] IS NULL OR counters.[instance_name] COLLATE SQL_Latin1_General_CP1_CI_AS = RTRIM(dmv.[instance_name]) COLLATE SQL_Latin1_General_CP1_CI_AS)
+            AND (counters.[instance_name] IS NULL OR counters.[instance_name] COLLATE SQL_Latin1_General_CP1_CI_AS = RTRIM(dmv.[instance_name]) COLLATE SQL_Latin1_General_CP1_CI_AS);
 
     /* Set the latencies and averages. We could do this with a CTE, but we're not ambitious today. */
     UPDATE fNow
     SET avg_stall_read_ms = ((fNow.io_stall_read_ms - fBase.io_stall_read_ms) / (fNow.num_of_reads - fBase.num_of_reads))
     FROM #FileStats fNow
     INNER JOIN #FileStats fBase ON fNow.DatabaseID = fBase.DatabaseID AND fNow.FileID = fBase.FileID AND fNow.SampleTime > fBase.SampleTime AND fNow.num_of_reads > fBase.num_of_reads AND fNow.io_stall_read_ms > fBase.io_stall_read_ms
-    WHERE (fNow.num_of_reads - fBase.num_of_reads) > 0
+    WHERE (fNow.num_of_reads - fBase.num_of_reads) > 0;
 
     UPDATE fNow
     SET avg_stall_write_ms = ((fNow.io_stall_write_ms - fBase.io_stall_write_ms) / (fNow.num_of_writes - fBase.num_of_writes))
     FROM #FileStats fNow
     INNER JOIN #FileStats fBase ON fNow.DatabaseID = fBase.DatabaseID AND fNow.FileID = fBase.FileID AND fNow.SampleTime > fBase.SampleTime AND fNow.num_of_writes > fBase.num_of_writes AND fNow.io_stall_write_ms > fBase.io_stall_write_ms
-    WHERE (fNow.num_of_writes - fBase.num_of_writes) > 0
+    WHERE (fNow.num_of_writes - fBase.num_of_writes) > 0;
 
     UPDATE pNow
         SET [value_delta] = pNow.cntr_value - pFirst.cntr_value,
@@ -19963,9 +20463,9 @@ BEGIN
 
             INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details)
             VALUES (18, 210, 'Query Stats', 'Plan Cache Analysis Skipped', 'http://www.BrentOzar.com/go/topqueries',
-                'Due to excessive load, the plan cache analysis was skipped. To override this, use @ExpertMode = 1.')
+                'Due to excessive load, the plan cache analysis was skipped. To override this, use @ExpertMode = 1.');
 
-        END
+        END;
     ELSE IF @CheckProcedureCache = 1
         BEGIN
 
@@ -19981,7 +20481,7 @@ BEGIN
 											SELECT [sql_handle], 2 AS Pass, SYSDATETIMEOFFSET(), statement_start_offset, statement_end_offset, plan_generation_num, plan_handle, execution_count, total_worker_time, total_physical_reads, total_logical_writes, total_logical_reads, total_clr_time, total_elapsed_time, creation_time, NULL AS query_hash, NULL AS query_plan_hash, 0
 											FROM sys.dm_exec_query_stats qs
 											WHERE qs.last_execution_time >= @StartSampleTimeText;';
-				END
+				END;
 			ELSE
 				BEGIN
 				SET @StringToExecute = N'INSERT INTO #QueryStats ([sql_handle], Pass, SampleTime, statement_start_offset, statement_end_offset, plan_generation_num, plan_handle, execution_count, total_worker_time, total_physical_reads, total_logical_writes, total_logical_reads, total_clr_time, total_elapsed_time, creation_time, query_hash, query_plan_hash, Points)
@@ -19991,8 +20491,8 @@ BEGIN
 												INNER JOIN #FilterPlansByDatabase dbs ON CAST(attr.value AS INT) = dbs.DatabaseID
 											WHERE qs.last_execution_time >= @StartSampleTimeText
 												AND attr.attribute = ''dbid'';';
-				END
-			END
+				END;
+			END;
 		ELSE
 			BEGIN
 			IF @FilterPlansByDatabase IS NULL
@@ -20001,7 +20501,7 @@ BEGIN
 											SELECT [sql_handle], 2 AS Pass, SYSDATETIMEOFFSET(), statement_start_offset, statement_end_offset, plan_generation_num, plan_handle, execution_count, total_worker_time, total_physical_reads, total_logical_writes, total_logical_reads, total_clr_time, total_elapsed_time, creation_time, query_hash, query_plan_hash, 0
 											FROM sys.dm_exec_query_stats qs
 											WHERE qs.last_execution_time >= @StartSampleTimeText';
-				END
+				END;
 			ELSE
 				BEGIN
 				SET @StringToExecute = N'INSERT INTO #QueryStats ([sql_handle], Pass, SampleTime, statement_start_offset, statement_end_offset, plan_generation_num, plan_handle, execution_count, total_worker_time, total_physical_reads, total_logical_writes, total_logical_reads, total_clr_time, total_elapsed_time, creation_time, query_hash, query_plan_hash, Points)
@@ -20011,8 +20511,8 @@ BEGIN
 											INNER JOIN #FilterPlansByDatabase dbs ON CAST(attr.value AS INT) = dbs.DatabaseID
 											WHERE qs.last_execution_time >= @StartSampleTimeText
 												AND attr.attribute = ''dbid'';';
-				END
-			END
+				END;
+			END;
 		/* Old version pre-2016/06/13:
         IF @@VERSION LIKE 'Microsoft SQL Server 2005%'
             SET @StringToExecute = N'INSERT INTO #QueryStats ([sql_handle], Pass, SampleTime, statement_start_offset, statement_end_offset, plan_generation_num, plan_handle, execution_count, total_worker_time, total_physical_reads, total_logical_writes, total_logical_reads, total_clr_time, total_elapsed_time, creation_time, query_hash, query_plan_hash, Points)
@@ -20140,17 +20640,17 @@ BEGIN
                 LEFT OUTER JOIN #QueryStats qsFirst ON qsNow.[sql_handle] = qsFirst.[sql_handle] AND qsNow.statement_start_offset = qsFirst.statement_start_offset AND qsNow.statement_end_offset = qsFirst.statement_end_offset AND qsNow.plan_generation_num = qsFirst.plan_generation_num AND qsNow.plan_handle = qsFirst.plan_handle AND qsFirst.Pass = 1
                 CROSS APPLY sys.dm_exec_sql_text(qsNow.sql_handle) AS st
                 CROSS APPLY sys.dm_exec_query_plan(qsNow.plan_handle) AS qp
-            WHERE qsNow.Points > 0 AND st.text IS NOT NULL AND qp.query_plan IS NOT NULL
+            WHERE qsNow.Points > 0 AND st.text IS NOT NULL AND qp.query_plan IS NOT NULL;
 
             UPDATE #BlitzFirstResults
                 SET DatabaseID = CAST(attr.value AS INT),
                 DatabaseName = DB_NAME(CAST(attr.value AS INT))
             FROM #BlitzFirstResults
                 CROSS APPLY sys.dm_exec_plan_attributes(#BlitzFirstResults.PlanHandle) AS attr
-            WHERE attr.attribute = 'dbid'
+            WHERE attr.attribute = 'dbid';
 
 
-        END /* IF DATEDIFF(ss, @FinishSampleTime, SYSDATETIMEOFFSET()) > 10 AND @CheckProcedureCache = 1 */
+        END; /* IF DATEDIFF(ss, @FinishSampleTime, SYSDATETIMEOFFSET()) > 10 AND @CheckProcedureCache = 1 */
 
 
 	RAISERROR('Analyzing changes between first and second passes of DMVs',10,1) WITH NOWAIT;
@@ -20162,7 +20662,7 @@ BEGIN
         200 AS Priority,
         'Wait Stats' AS FindingGroup,
         wNow.wait_type AS Finding, /* IF YOU CHANGE THIS, STUFF WILL BREAK. Other checks look for wait type names in the Finding field. See checks 11, 12 as example. */
-        N'http://www.brentozar.com/sql/wait-stats/#' + wNow.wait_type AS URL,
+        N'https://www.sqlskills.com/help/waits/' + LOWER(wNow.wait_type) + '/' AS URL,
         'For ' + CAST(((wNow.wait_time_ms - COALESCE(wBase.wait_time_ms,0)) / 1000) AS NVARCHAR(100)) + ' seconds over the last ' + CASE @Seconds WHEN 0 THEN (CAST(DATEDIFF(dd,@StartSampleTime,@FinishSampleTime) AS NVARCHAR(10)) + ' days') ELSE (CAST(@Seconds AS NVARCHAR(10)) + ' seconds') END + ', SQL Server was waiting on this particular bottleneck.' + @LineFeed + @LineFeed AS Details,
         'See the URL for more details on how to mitigate this wait type.' AS HowToStopIt,
         ((wNow.wait_time_ms - COALESCE(wBase.wait_time_ms,0)) / 1000) AS DetailsInt
@@ -20209,7 +20709,7 @@ BEGIN
 		WHERE (fNow.io_stall_read_ms - fBase.io_stall_read_ms) / (fNow.num_of_reads - fBase.num_of_reads) >= @FileLatencyThresholdMS
 			AND fNow.TypeDesc = 'ROWS'
 		ORDER BY (fNow.io_stall_read_ms - fBase.io_stall_read_ms) / (fNow.num_of_reads - fBase.num_of_reads) DESC;
-	END	
+	END;	
 
     /* Server Performance - Slow Log File Writes - CheckID 12 */
 	IF EXISTS (SELECT * FROM #BlitzFirstResults WHERE Finding LIKE 'WRITELOG%')
@@ -20234,7 +20734,7 @@ BEGIN
 		WHERE (fNow.io_stall_write_ms - fBase.io_stall_write_ms) / (fNow.num_of_writes - fBase.num_of_writes) >= @FileLatencyThresholdMS
 			AND fNow.TypeDesc = 'LOG'
 		ORDER BY (fNow.io_stall_write_ms - fBase.io_stall_write_ms) / (fNow.num_of_writes - fBase.num_of_writes) DESC;
-	END
+	END;
 
 
     /* SQL Server Internal Maintenance - Log File Growing - CheckID 13 */
@@ -20251,7 +20751,7 @@ BEGIN
     WHERE ps.Pass = 2
         AND object_name = @ServiceName + ':Databases'
         AND counter_name = 'Log Growths'
-        AND value_delta > 0
+        AND value_delta > 0;
 
 
     /* SQL Server Internal Maintenance - Log File Shrinking - CheckID 14 */
@@ -20268,7 +20768,7 @@ BEGIN
     WHERE ps.Pass = 2
         AND object_name = @ServiceName + ':Databases'
         AND counter_name = 'Log Shrinks'
-        AND value_delta > 0
+        AND value_delta > 0;
 
     /* Query Problems - Compilations/Sec High - CheckID 15 */
     INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt)
@@ -20289,7 +20789,7 @@ BEGIN
         AND ps.object_name = @ServiceName + ':SQL Statistics'
         AND ps.counter_name = 'Batch Requests/sec'
         AND ps.value_delta > (1000 * @Seconds) /* Ignore servers sitting idle */
-        AND (psComp.value_delta * 10) > ps.value_delta /* Compilations are more than 10% of batch requests per second */
+        AND (psComp.value_delta * 10) > ps.value_delta; /* Compilations are more than 10% of batch requests per second */
 
     /* Query Problems - Re-Compilations/Sec High - CheckID 16 */
     INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt)
@@ -20310,7 +20810,7 @@ BEGIN
         AND ps.object_name = @ServiceName + ':SQL Statistics'
         AND ps.counter_name = 'Batch Requests/sec'
         AND ps.value_delta > (1000 * @Seconds) /* Ignore servers sitting idle */
-        AND (psComp.value_delta * 10) > ps.value_delta /* Recompilations are more than 10% of batch requests per second */
+        AND (psComp.value_delta * 10) > ps.value_delta; /* Recompilations are more than 10% of batch requests per second */
 
     /* Table Problems - Forwarded Fetches/Sec High - CheckID 29 */
     INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt)
@@ -20327,7 +20827,7 @@ BEGIN
     WHERE ps.Pass = 2
         AND ps.object_name = @ServiceName + ':Access Methods'
         AND ps.counter_name = 'Forwarded Records/sec'
-        AND ps.value_delta > (100 * @Seconds) /* Ignore servers sitting idle */
+        AND ps.value_delta > (100 * @Seconds); /* Ignore servers sitting idle */
 
 
     /* In-Memory OLTP - Garbage Collection in Progress - CheckID 31 */
@@ -20346,7 +20846,7 @@ BEGIN
     WHERE ps.Pass = 2
         AND ps.object_name LIKE '%XTP Garbage Collection'
         AND ps.counter_name = 'Rows processed/sec'
-        AND ps.value_delta > (100 * @Seconds) /* Ignore servers sitting idle */
+        AND ps.value_delta > (100 * @Seconds); /* Ignore servers sitting idle */
 
     /* In-Memory OLTP - Transactions Aborted - CheckID 32 */
     INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt)
@@ -20363,7 +20863,7 @@ BEGIN
     WHERE ps.Pass = 2
         AND ps.object_name LIKE '%XTP Transactions'
         AND ps.counter_name = 'Transactions aborted/sec'
-        AND ps.value_delta > (10 * @Seconds) /* Ignore servers sitting idle */
+        AND ps.value_delta > (10 * @Seconds); /* Ignore servers sitting idle */
 
     /* Query Problems - Suboptimal Plans/Sec High - CheckID 33 */
     INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt)
@@ -20380,7 +20880,7 @@ BEGIN
     WHERE ps.Pass = 2
         AND ps.object_name = @ServiceName + ':Workload GroupStats' 
         AND ps.counter_name = 'Suboptimal plans/sec'
-        AND ps.value_delta > (10 * @Seconds) /* Ignore servers sitting idle */
+        AND ps.value_delta > (10 * @Seconds); /* Ignore servers sitting idle */
 
 
 
@@ -20400,8 +20900,8 @@ BEGIN
         AND ps.counter_name = 'Batch Requests/sec';
 
 
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','SQL Compilations/sec', NULL)
-        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','SQL Re-Compilations/sec', NULL)
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','SQL Compilations/sec', NULL);
+        INSERT INTO #PerfmonCounters ([object_name],[counter_name],[instance_name]) VALUES (@ServiceName + ':SQL Statistics','SQL Re-Compilations/sec', NULL);
 
     /* Server Info - SQL Compilations/sec - CheckID 25 */
     IF @ExpertMode = 1
@@ -20437,7 +20937,7 @@ BEGIN
 
     /* Server Info - Wait Time per Core per Sec - CheckID 20 */
     IF @Seconds > 0
-    BEGIN
+    BEGIN;
         WITH waits1(SampleTime, waits_ms) AS (SELECT SampleTime, SUM(ws1.wait_time_ms) FROM #WaitStats ws1 WHERE ws1.Pass = 1 GROUP BY SampleTime),
         waits2(SampleTime, waits_ms) AS (SELECT SampleTime, SUM(ws2.wait_time_ms) FROM #WaitStats ws2 WHERE ws2.Pass = 2 GROUP BY SampleTime),
         cores(cpu_count) AS (SELECT SUM(1) FROM sys.dm_os_schedulers WHERE status = 'VISIBLE ONLINE' AND is_online = 1)
@@ -20452,7 +20952,7 @@ BEGIN
         FROM cores i
           CROSS JOIN waits1
           CROSS JOIN waits2;
-    END
+    END;
 
     /* Server Performance - High CPU Utilization CheckID 24 */
     IF @Seconds >= 30
@@ -20473,7 +20973,7 @@ BEGIN
                     AND record LIKE '%<SystemHealth>%'
                     ORDER BY timestamp DESC) AS rb
             ) AS y
-            WHERE 100 - SystemIdle >= 50
+            WHERE 100 - SystemIdle >= 50;
 
         INSERT INTO #BlitzFirstResults (CheckID, Priority, FindingsGroup, Finding, Details, DetailsInt, URL)
         SELECT 23, 250, 'Server Info', 'CPU Utilization', CAST(100 - SystemIdle AS NVARCHAR(20)) + N'%. Ring buffer details: ' + CAST(record AS NVARCHAR(4000)), 100 - SystemIdle, 'http://www.BrentOzar.com/go/cpu'
@@ -20486,9 +20986,9 @@ BEGIN
                     WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
                     AND record LIKE '%<SystemHealth>%'
                     ORDER BY timestamp DESC) AS rb
-            ) AS y
+            ) AS y;
 
-        END /* IF @Seconds < 30 */
+        END; /* IF @Seconds < 30 */
 
 
     /* If we didn't find anything, apologize. */
@@ -20511,7 +21011,7 @@ BEGIN
                   'Try running our more in-depth checks with sp_Blitz, or there may not be an unusual SQL Server performance problem. '
                 );
 
-    END /*IF NOT EXISTS (SELECT * FROM #BlitzFirstResults) */
+    END; /*IF NOT EXISTS (SELECT * FROM #BlitzFirstResults) */
 
         /* Add credits for the nice folks who put so much time into building and maintaining this for free: */
         INSERT  INTO #BlitzFirstResults
@@ -20563,8 +21063,8 @@ BEGIN
                                         'Outdated sp_BlitzFirst' AS FindingsGroup ,
                                         'sp_BlitzFirst is Over 6 Months Old' AS Finding ,
                                         'http://FirstResponderKit.org/' AS URL ,
-                                        'Some things get better with age, like fine wine and your T-SQL. However, sp_BlitzFirst is not one of those things - time to go download the current one.' AS Details
-                    END
+                                        'Some things get better with age, like fine wine and your T-SQL. However, sp_BlitzFirst is not one of those things - time to go download the current one.' AS Details;
+                    END;
 
     RAISERROR('Analysis finished, outputting results',10,1) WITH NOWAIT;
 
@@ -20598,7 +21098,7 @@ BEGIN
                 FROM #BlitzFirstResults
                 WHERE CheckID = 30
                 ORDER BY DetailsInt DESC;
-            END
+            END;
 
         /* Too much free memory - which probably indicates queries finished w/huge grants - CheckID 34 */
         IF @BlitzCacheSortOrder IS NULL AND EXISTS (SELECT * FROM #BlitzFirstResults WHERE CheckID = 34)
@@ -20624,7 +21124,7 @@ BEGIN
                 FROM #BlitzFirstResults
                 WHERE CheckID = 6
                 ORDER BY DetailsInt DESC;
-            END
+            END;
         /* Still null? Just use the default. */
 
 
@@ -20677,13 +21177,13 @@ BEGIN
                     + @OutputDatabaseName + '.'
                     + @OutputSchemaName + '.'
                     + QUOTENAME(@OutputTableNameBlitzCache)
-                    + ' WHERE ServerName = '''
-                    + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-                    + ''' AND CheckDate < ''' + CAST(CAST( (DATEADD(DAY, -1 * @OutputTableRetentionDays, GETDATE() ) ) AS DATE) AS NVARCHAR(20)) + ''';';
-                EXEC(@StringToExecute);
+                    + ' WHERE ServerName = @SrvName AND CheckDate < @CheckDate;';
+                EXEC sp_executesql @StringToExecute,
+					N'@SrvName NVARCHAR(128), @CheckDate date',
+					@@SERVERNAME, @OutputTableCleanupDate;
 
 
-            END
+            END;
 
         ELSE /* No sp_BlitzCache found, or it's outdated */
             BEGIN
@@ -20700,12 +21200,12 @@ BEGIN
                                 'Outdated or Missing sp_BlitzCache' AS FindingsGroup ,
                                 'Update Your sp_BlitzCache' AS Finding ,
                                 'http://FirstResponderKit.org/' AS URL ,
-                                'You passed in @OutputTableNameBlitzCache, but we need a newer version of sp_BlitzCache in master or the current database.' AS Details
-            END
+                                'You passed in @OutputTableNameBlitzCache, but we need a newer version of sp_BlitzCache in master or the current database.' AS Details;
+            END;
 
     	RAISERROR('sp_BlitzCache Finished',10,1) WITH NOWAIT;
 
-    END /* End running sp_BlitzCache */
+    END; /* End running sp_BlitzCache */
 
     /* @OutputTableName lets us export the results to a permanent table */
     IF @OutputDatabaseName IS NOT NULL
@@ -20751,9 +21251,10 @@ BEGIN
                 DatabaseName NVARCHAR(128) NULL,
                 OpenTransactionCount INT NULL,
                 DetailsInt INT NULL,
-                CONSTRAINT [PK_' + CAST(NEWID() AS CHAR(36)) + '] PRIMARY KEY CLUSTERED (ID ASC));'
+                PRIMARY KEY CLUSTERED (ID ASC));';
 
         EXEC(@StringToExecute);
+
         SET @StringToExecute = N' IF EXISTS(SELECT * FROM '
             + @OutputDatabaseName
             + '.INFORMATION_SCHEMA.SCHEMATA WHERE QUOTENAME(SCHEMA_NAME) = '''
@@ -20761,10 +21262,12 @@ BEGIN
             + @OutputDatabaseName + '.'
             + @OutputSchemaName + '.'
             + @OutputTableName
-            + ' (ServerName, CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt) SELECT '''
-            + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''', ''' + (CONVERT(NVARCHAR(100), @StartSampleTime, 121)) + ''', CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt FROM #BlitzFirstResults ORDER BY Priority , FindingsGroup , Finding , Details';
-        EXEC(@StringToExecute);
+            + ' (ServerName, CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt) SELECT '
+            + ' @SrvName, @CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt FROM #BlitzFirstResults ORDER BY Priority , FindingsGroup , Finding , Details';
+		
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate datetimeoffset',
+			@@SERVERNAME, @StartSampleTime;
 
         /* Delete history older than @OutputTableRetentionDays */
         SET @StringToExecute = N' IF EXISTS(SELECT * FROM '
@@ -20774,13 +21277,13 @@ BEGIN
             + @OutputDatabaseName + '.'
             + @OutputSchemaName + '.'
             + @OutputTableName
-            + ' WHERE ServerName = '''
-            + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''' AND CheckDate < ''' + CAST(CAST( (DATEADD(DAY, -1 * @OutputTableRetentionDays, GETDATE() ) ) AS DATE) AS NVARCHAR(20)) + ''';';
-        EXEC(@StringToExecute);
+            + ' WHERE ServerName = @SrvName AND CheckDate < @CheckDate ;';
+		
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate date',
+			@@SERVERNAME, @OutputTableCleanupDate;
 
-
-    END
+    END;
     ELSE IF (SUBSTRING(@OutputTableName, 2, 2) = '##')
     BEGIN
         SET @StringToExecute = N' IF (OBJECT_ID(''tempdb..'
@@ -20809,18 +21312,20 @@ BEGIN
                 DatabaseName NVARCHAR(128) NULL,
                 OpenTransactionCount INT NULL,
                 DetailsInt INT NULL,
-                CONSTRAINT [PK_' + CAST(NEWID() AS CHAR(36)) + '] PRIMARY KEY CLUSTERED (ID ASC));'
+                PRIMARY KEY CLUSTERED (ID ASC));'
             + ' INSERT '
             + @OutputTableName
-            + ' (ServerName, CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt) SELECT '''
-            + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''', ''' + CONVERT(NVARCHAR(100), @StartSampleTime, 121) + ''', CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt FROM #BlitzFirstResults ORDER BY Priority , FindingsGroup , Finding , Details';
-        EXEC(@StringToExecute);
-    END
+            + ' (ServerName, CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt) SELECT '
+            + ' @SrvName, @CheckDate, CheckID, Priority, FindingsGroup, Finding, URL, Details, HowToStopIt, QueryPlan, QueryText, StartTime, LoginName, NTUserName, OriginalLoginName, ProgramName, HostName, DatabaseID, DatabaseName, OpenTransactionCount, DetailsInt FROM #BlitzFirstResults ORDER BY Priority , FindingsGroup , Finding , Details';
+		
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate datetimeoffset',
+			@@SERVERNAME, @StartSampleTime;
+    END;
     ELSE IF (SUBSTRING(@OutputTableName, 2, 1) = '#')
     BEGIN
-        RAISERROR('Due to the nature of Dymamic SQL, only global (i.e. double pound (##)) temp tables are supported for @OutputTableName', 16, 0)
-    END
+        RAISERROR('Due to the nature of Dymamic SQL, only global (i.e. double pound (##)) temp tables are supported for @OutputTableName', 16, 0);
+    END;
 
     /* @OutputTableNameFileStats lets us export the results to a permanent table */
     IF @OutputDatabaseName IS NOT NULL
@@ -20861,8 +21366,9 @@ BEGIN
                 num_of_writes BIGINT ,
                 bytes_written BIGINT,
                 PhysicalName NVARCHAR(520) ,
-                CONSTRAINT [PK_' + CAST(NEWID() AS CHAR(36)) + '] PRIMARY KEY CLUSTERED (ID ASC));'
-        EXEC(@StringToExecute);
+                PRIMARY KEY CLUSTERED (ID ASC));';
+
+		EXEC(@StringToExecute);
 
         /* Create the view */
         SET @ObjectFullName = @OutputDatabaseName + N'.' + @OutputSchemaName + N'.' +  @OutputTableNameFileStats_View;
@@ -20873,24 +21379,63 @@ BEGIN
                 + '; EXEC (''CREATE VIEW '
                 + @OutputSchemaName + '.'
                 + @OutputTableNameFileStats_View + ' AS ' + @LineFeed
-                + 'SELECT f.ServerName, f.CheckDate, f.DatabaseID, f.DatabaseName, f.FileID, f.FileLogicalName, f.TypeDesc, f.PhysicalName, f.SizeOnDiskMB' + @LineFeed
-                + ', DATEDIFF(ss, fPrior.CheckDate, f.CheckDate) AS ElapsedSeconds' + @LineFeed
-                + ', (f.SizeOnDiskMB - fPrior.SizeOnDiskMB) AS SizeOnDiskMBgrowth' + @LineFeed
-                + ', (f.io_stall_read_ms - fPrior.io_stall_read_ms) AS io_stall_read_ms' + @LineFeed
-                + ', io_stall_read_ms_average = CASE WHEN (f.num_of_reads - fPrior.num_of_reads) = 0 THEN 0 ELSE (f.io_stall_read_ms - fPrior.io_stall_read_ms) / (f.num_of_reads - fPrior.num_of_reads) END' + @LineFeed
-                + ', (f.num_of_reads - fPrior.num_of_reads) AS num_of_reads' + @LineFeed
-                + ', (f.bytes_read - fPrior.bytes_read) / 1024.0 / 1024.0 AS megabytes_read' + @LineFeed
-                + ', (f.io_stall_write_ms - fPrior.io_stall_write_ms) AS io_stall_write_ms' + @LineFeed
-                + ', io_stall_write_ms_average = CASE WHEN (f.num_of_writes - fPrior.num_of_writes) = 0 THEN 0 ELSE (f.io_stall_write_ms - fPrior.io_stall_write_ms) / (f.num_of_writes - fPrior.num_of_writes) END' + @LineFeed
-                + ', (f.num_of_writes - fPrior.num_of_writes) AS num_of_writes' + @LineFeed
-                + ', (f.bytes_written - fPrior.bytes_written) / 1024.0 / 1024.0 AS megabytes_written' + @LineFeed
-                + 'FROM ' + @OutputSchemaName + '.' + @OutputTableNameFileStats + ' f' + @LineFeed
-                + 'INNER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameFileStats + ' fPrior ON f.ServerName = fPrior.ServerName AND f.DatabaseID = fPrior.DatabaseID AND f.FileID = fPrior.FileID AND f.CheckDate > fPrior.CheckDate' + @LineFeed
-                + 'LEFT OUTER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameFileStats + ' fMiddle ON f.ServerName = fMiddle.ServerName AND f.DatabaseID = fMiddle.DatabaseID AND f.FileID = fMiddle.FileID AND f.CheckDate > fMiddle.CheckDate AND fMiddle.CheckDate > fPrior.CheckDate' + @LineFeed
-                + 'WHERE fMiddle.ID IS NULL AND f.num_of_reads >= fPrior.num_of_reads AND f.num_of_writes >= fPrior.num_of_writes
-                    AND DATEDIFF(MI, fPrior.CheckDate, f.CheckDate) BETWEEN 1 AND 60;'')'
-            EXEC(@StringToExecute);
-            END
+                + 'WITH RowDates as' + @LineFeed
+                + '(' + @LineFeed
+                + '        SELECT ' + @LineFeed
+                + '                ROW_NUMBER() OVER (ORDER BY [CheckDate]) ID,' + @LineFeed
+                + '                [CheckDate]' + @LineFeed
+                + '        FROM ' + @OutputSchemaName + '.' + @OutputTableNameFileStats + '' + @LineFeed
+                + '        GROUP BY [CheckDate]' + @LineFeed
+                + '),' + @LineFeed
+                + 'CheckDates as' + @LineFeed
+                + '(' + @LineFeed
+                + '        SELECT ThisDate.CheckDate,' + @LineFeed
+                + '               LastDate.CheckDate as PreviousCheckDate' + @LineFeed
+                + '        FROM RowDates ThisDate' + @LineFeed
+                + '        JOIN RowDates LastDate' + @LineFeed
+                + '        ON ThisDate.ID = LastDate.ID + 1' + @LineFeed
+                + ')' + @LineFeed
+                + '     SELECT f.ServerName,' + @LineFeed
+                + '            f.CheckDate,' + @LineFeed
+                + '            f.DatabaseID,' + @LineFeed
+                + '            f.DatabaseName,' + @LineFeed
+                + '            f.FileID,' + @LineFeed
+                + '            f.FileLogicalName,' + @LineFeed
+                + '            f.TypeDesc,' + @LineFeed
+                + '            f.PhysicalName,' + @LineFeed
+                + '            f.SizeOnDiskMB,' + @LineFeed
+                + '            DATEDIFF(ss, fPrior.CheckDate, f.CheckDate) AS ElapsedSeconds,' + @LineFeed
+                + '            (f.SizeOnDiskMB - fPrior.SizeOnDiskMB) AS SizeOnDiskMBgrowth,' + @LineFeed
+                + '            (f.io_stall_read_ms - fPrior.io_stall_read_ms) AS io_stall_read_ms,' + @LineFeed
+                + '            io_stall_read_ms_average = CASE' + @LineFeed
+                + '                                           WHEN(f.num_of_reads - fPrior.num_of_reads) = 0' + @LineFeed
+                + '                                           THEN 0' + @LineFeed
+                + '                                           ELSE(f.io_stall_read_ms - fPrior.io_stall_read_ms) /     (f.num_of_reads   -           fPrior.num_of_reads)' + @LineFeed
+                + '                                       END,' + @LineFeed
+                + '            (f.num_of_reads - fPrior.num_of_reads) AS num_of_reads,' + @LineFeed
+                + '            (f.bytes_read - fPrior.bytes_read) / 1024.0 / 1024.0 AS megabytes_read,' + @LineFeed
+                + '            (f.io_stall_write_ms - fPrior.io_stall_write_ms) AS io_stall_write_ms,' + @LineFeed
+                + '            io_stall_write_ms_average = CASE' + @LineFeed
+                + '                                            WHEN(f.num_of_writes - fPrior.num_of_writes) = 0' + @LineFeed
+                + '                                            THEN 0' + @LineFeed
+                + '                                            ELSE(f.io_stall_write_ms - fPrior.io_stall_write_ms) /         (f.num_of_writes   -       fPrior.num_of_writes)' + @LineFeed
+                + '                                        END,' + @LineFeed
+                + '            (f.num_of_writes - fPrior.num_of_writes) AS num_of_writes,' + @LineFeed
+                + '            (f.bytes_written - fPrior.bytes_written) / 1024.0 / 1024.0 AS megabytes_written' + @LineFeed
+                + '     FROM   ' + @OutputSchemaName + '.' + @OutputTableNameFileStats + ' f' + @LineFeed
+                + '            INNER HASH JOIN CheckDates DATES ON f.CheckDate = DATES.CheckDate' + @LineFeed
+                + '            INNER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameFileStats + ' fPrior ON f.ServerName =                 fPrior.ServerName' + @LineFeed
+                + '                                                              AND f.DatabaseID = fPrior.DatabaseID' +     @LineFeed
+                + '                                                              AND f.FileID = fPrior.FileID' + @LineFeed
+                + '                                                              AND fPrior.CheckDate =   DATES.PreviousCheckDate'   +           @LineFeed
+                + '' + @LineFeed
+                + '     WHERE  f.num_of_reads >= fPrior.num_of_reads' + @LineFeed
+                + '            AND f.num_of_writes >= fPrior.num_of_writes' + @LineFeed
+                + '            AND DATEDIFF(MI, fPrior.CheckDate, f.CheckDate) BETWEEN 1 AND 60;'')'
+
+			EXEC(@StringToExecute);
+            END;
+
 
         SET @StringToExecute = N' IF EXISTS(SELECT * FROM '
             + @OutputDatabaseName
@@ -20899,11 +21444,12 @@ BEGIN
             + @OutputDatabaseName + '.'
             + @OutputSchemaName + '.'
             + @OutputTableNameFileStats
-            + ' (ServerName, CheckDate, DatabaseID, FileID, DatabaseName, FileLogicalName, TypeDesc, SizeOnDiskMB, io_stall_read_ms, num_of_reads, bytes_read, io_stall_write_ms, num_of_writes, bytes_written, PhysicalName) SELECT '''
-            + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''', ''' + CONVERT(NVARCHAR(100), @StartSampleTime, 121) + ''', '
-            + 'DatabaseID, FileID, DatabaseName, FileLogicalName, TypeDesc, SizeOnDiskMB, io_stall_read_ms, num_of_reads, bytes_read, io_stall_write_ms, num_of_writes, bytes_written, PhysicalName FROM #FileStats WHERE Pass = 2';
-        EXEC(@StringToExecute);
+            + ' (ServerName, CheckDate, DatabaseID, FileID, DatabaseName, FileLogicalName, TypeDesc, SizeOnDiskMB, io_stall_read_ms, num_of_reads, bytes_read, io_stall_write_ms, num_of_writes, bytes_written, PhysicalName) SELECT '
+            + ' @SrvName, @CheckDate, DatabaseID, FileID, DatabaseName, FileLogicalName, TypeDesc, SizeOnDiskMB, io_stall_read_ms, num_of_reads, bytes_read, io_stall_write_ms, num_of_writes, bytes_written, PhysicalName FROM #FileStats WHERE Pass = 2';
+
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate datetimeoffset',
+			@@SERVERNAME, @StartSampleTime;
 
         /* Delete history older than @OutputTableRetentionDays */
         SET @StringToExecute = N' IF EXISTS(SELECT * FROM '
@@ -20913,12 +21459,13 @@ BEGIN
             + @OutputDatabaseName + '.'
             + @OutputSchemaName + '.'
             + @OutputTableNameFileStats
-            + ' WHERE ServerName = '''
-            + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''' AND CheckDate < ''' + CAST(CAST( (DATEADD(DAY, -1 * @OutputTableRetentionDays, GETDATE() ) ) AS DATE) AS NVARCHAR(20)) + ''';';
-        EXEC(@StringToExecute);
+            + ' WHERE ServerName = @SrvName AND CheckDate < @CheckDate ;';
 
-    END
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate date',
+			@@SERVERNAME, @OutputTableCleanupDate;
+
+    END;
     ELSE IF (SUBSTRING(@OutputTableNameFileStats, 2, 2) = '##')
     BEGIN
         SET @StringToExecute = N' IF (OBJECT_ID(''tempdb..'
@@ -20942,19 +21489,20 @@ BEGIN
                 bytes_written BIGINT,
                 PhysicalName NVARCHAR(520) ,
                 DetailsInt INT NULL,
-                CONSTRAINT [PK_' + CAST(NEWID() AS CHAR(36)) + '] PRIMARY KEY CLUSTERED (ID ASC));'
+                PRIMARY KEY CLUSTERED (ID ASC));'
             + ' INSERT '
             + @OutputTableNameFileStats
-            + ' (ServerName, CheckDate, DatabaseID, FileID, DatabaseName, FileLogicalName, TypeDesc, SizeOnDiskMB, io_stall_read_ms, num_of_reads, bytes_read, io_stall_write_ms, num_of_writes, bytes_written, PhysicalName) SELECT '''
-            + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''', ''' + CONVERT(NVARCHAR(100), @StartSampleTime, 121) + ''', '
-            + 'DatabaseID, FileID, DatabaseName, FileLogicalName, TypeDesc, SizeOnDiskMB, io_stall_read_ms, num_of_reads, bytes_read, io_stall_write_ms, num_of_writes, bytes_written, PhysicalName FROM #FileStats WHERE Pass = 2';
-        EXEC(@StringToExecute);
-    END
+            + ' (ServerName, CheckDate, DatabaseID, FileID, DatabaseName, FileLogicalName, TypeDesc, SizeOnDiskMB, io_stall_read_ms, num_of_reads, bytes_read, io_stall_write_ms, num_of_writes, bytes_written, PhysicalName) SELECT '
+            + ' @SrvName, @CheckDate, DatabaseID, FileID, DatabaseName, FileLogicalName, TypeDesc, SizeOnDiskMB, io_stall_read_ms, num_of_reads, bytes_read, io_stall_write_ms, num_of_writes, bytes_written, PhysicalName FROM #FileStats WHERE Pass = 2';
+
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate datetimeoffset',
+			@@SERVERNAME, @StartSampleTime;
+    END;
     ELSE IF (SUBSTRING(@OutputTableNameFileStats, 2, 1) = '#')
     BEGIN
-        RAISERROR('Due to the nature of Dymamic SQL, only global (i.e. double pound (##)) temp tables are supported for @OutputTableName', 16, 0)
-    END
+        RAISERROR('Due to the nature of Dymamic SQL, only global (i.e. double pound (##)) temp tables are supported for @OutputTableName', 16, 0);
+    END;
 
 
     /* @OutputTableNamePerfmonStats lets us export the results to a permanent table */
@@ -20990,8 +21538,9 @@ BEGIN
                 [cntr_type] INT NOT NULL,
                 [value_delta] BIGINT NULL,
                 [value_per_second] DECIMAL(18,2) NULL,
-                CONSTRAINT [PK_' + CAST(NEWID() AS CHAR(36)) + '] PRIMARY KEY CLUSTERED (ID ASC));'
-        EXEC(@StringToExecute);
+                PRIMARY KEY CLUSTERED (ID ASC));';
+
+		EXEC(@StringToExecute);
 
         /* Create the view */
         SET @ObjectFullName = @OutputDatabaseName + N'.' + @OutputSchemaName + N'.' +  @OutputTableNamePerfmonStats_View;
@@ -21002,18 +21551,171 @@ BEGIN
                 + '; EXEC (''CREATE VIEW '
                 + @OutputSchemaName + '.'
                 + @OutputTableNamePerfmonStats_View + ' AS ' + @LineFeed
-                + 'SELECT p.ServerName, p.CheckDate, p.object_name, p.counter_name, p.instance_name' + @LineFeed
-                + ', DATEDIFF(ss, pPrior.CheckDate, p.CheckDate) AS ElapsedSeconds' + @LineFeed
-                + ', p.cntr_value' + @LineFeed
-                + ', p.cntr_type' + @LineFeed
-                + ', (p.cntr_value - pPrior.cntr_value) AS cntr_delta' + @LineFeed
-                + ', (p.cntr_value - pPrior.cntr_value) * 1.0 / DATEDIFF(ss, pPrior.CheckDate, p.CheckDate) AS cntr_delta_per_second' + @LineFeed
-                + 'FROM ' + @OutputSchemaName + '.' + @OutputTableNamePerfmonStats + ' p' + @LineFeed
-                + 'INNER JOIN ' + @OutputSchemaName + '.' + @OutputTableNamePerfmonStats + ' pPrior ON p.ServerName = pPrior.ServerName AND p.object_name = pPrior.object_name AND p.counter_name = pPrior.counter_name AND p.instance_name = pPrior.instance_name AND p.CheckDate > pPrior.CheckDate' + @LineFeed
-                + 'LEFT OUTER JOIN ' + @OutputSchemaName + '.' + @OutputTableNamePerfmonStats + ' pMiddle ON p.ServerName = pMiddle.ServerName AND p.object_name = pMiddle.object_name AND p.counter_name = pMiddle.counter_name AND p.instance_name = pMiddle.instance_name AND p.CheckDate > pMiddle.CheckDate AND pMiddle.CheckDate > pPrior.CheckDate' + @LineFeed
-                + 'WHERE pMiddle.ID IS NULL AND DATEDIFF(MI, pPrior.CheckDate, p.CheckDate) BETWEEN 1 AND 60;'')'
-            EXEC(@StringToExecute);
+                + 'WITH RowDates as' + @LineFeed
+                + '(' + @LineFeed
+                + '        SELECT ' + @LineFeed
+                + '                ROW_NUMBER() OVER (ORDER BY [CheckDate]) ID,' + @LineFeed
+                + '                [CheckDate]' + @LineFeed
+                + '        FROM ' + @OutputSchemaName + '.' +@OutputTableNamePerfmonStats + '' + @LineFeed
+                + '        GROUP BY [CheckDate]' + @LineFeed
+                + '),' + @LineFeed
+                + 'CheckDates as' + @LineFeed
+                + '(' + @LineFeed
+                + '        SELECT ThisDate.CheckDate,' + @LineFeed
+                + '               LastDate.CheckDate as PreviousCheckDate' + @LineFeed
+                + '        FROM RowDates ThisDate' + @LineFeed
+                + '        JOIN RowDates LastDate' + @LineFeed
+                + '        ON ThisDate.ID = LastDate.ID + 1' + @LineFeed
+                + ')' + @LineFeed
+                + 'SELECT' + @LineFeed
+                + '       pMon.[ServerName]' + @LineFeed
+                + '      ,pMon.[CheckDate]' + @LineFeed
+                + '      ,pMon.[object_name]' + @LineFeed
+                + '      ,pMon.[counter_name]' + @LineFeed
+                + '      ,pMon.[instance_name]' + @LineFeed
+                + '      ,DATEDIFF(SECOND,pMonPrior.[CheckDate],pMon.[CheckDate]) AS ElapsedSeconds' + @LineFeed
+                + '      ,pMon.[cntr_value]' + @LineFeed
+                + '      ,pMon.[cntr_type]' + @LineFeed
+                + '      ,(pMon.[cntr_value] - pMonPrior.[cntr_value]) AS cntr_delta' + @LineFeed
+                + ' ,(pMon.cntr_value - pMonPrior.cntr_value) * 1.0 / DATEDIFF(ss, pMonPrior.CheckDate, pMon.CheckDate) AS cntr_delta_per_second' + @LineFeed
+                + '  FROM ' + @OutputSchemaName + '.' +@OutputTableNamePerfmonStats + ' pMon' + @LineFeed
+                + '  INNER HASH JOIN CheckDates Dates' + @LineFeed
+                + '  ON Dates.CheckDate = pMon.CheckDate' + @LineFeed
+                + '  JOIN ' + @OutputSchemaName + '.' +@OutputTableNamePerfmonStats + ' pMonPrior' + @LineFeed
+                + '  ON  Dates.PreviousCheckDate = pMonPrior.CheckDate' + @LineFeed
+                + '      AND pMon.[ServerName]    = pMonPrior.[ServerName]   ' + @LineFeed
+                + '      AND pMon.[object_name]   = pMonPrior.[object_name]  ' + @LineFeed
+                + '      AND pMon.[counter_name]  = pMonPrior.[counter_name] ' + @LineFeed
+                + '      AND pMon.[instance_name] = pMonPrior.[instance_name]' + @LineFeed
+                + '    WHERE DATEDIFF(MI, pMonPrior.CheckDate, pMon.CheckDate) BETWEEN 1 AND 60;'')'
+
+			EXEC(@StringToExecute);
+            END
+
+        /* Create the second view */
+        SET @ObjectFullName = @OutputDatabaseName + N'.' + @OutputSchemaName + N'.' +  @OutputTableNamePerfmonStatsActuals_View;
+        IF OBJECT_ID(@ObjectFullName) IS NULL
+            BEGIN
+            SET @StringToExecute = 'USE '
+                + @OutputDatabaseName
+                + '; EXEC (''CREATE VIEW '
+                + @OutputSchemaName + '.'
+                + @OutputTableNamePerfmonStatsActuals_View + ' AS ' + @LineFeed
+                + 'WITH PERF_AVERAGE_BULK AS' + @LineFeed
+                + '(' + @LineFeed
+                + '    SELECT ServerName,' + @LineFeed
+                + '           object_name,' + @LineFeed
+                + '           instance_name,' + @LineFeed
+                + '           counter_name,' + @LineFeed
+                + '           CASE WHEN CHARINDEX(''''('''', counter_name) = 0 THEN counter_name ELSE LEFT (counter_name, CHARINDEX(''''('''',counter_name)-1) END    AS   counter_join,' + @LineFeed
+                + '           CheckDate,' + @LineFeed
+                + '           cntr_delta' + @LineFeed
+                + '    FROM   ' + @OutputSchemaName + '.' + @OutputTableNamePerfmonStats_View + @LineFeed
+                + '    WHERE  cntr_type IN(1073874176)' + @LineFeed
+                + '    AND cntr_delta <> 0' + @LineFeed
+                + '),' + @LineFeed
+                + 'PERF_LARGE_RAW_BASE AS' + @LineFeed
+                + '(' + @LineFeed
+                + '    SELECT ServerName,' + @LineFeed
+                + '           object_name,' + @LineFeed
+                + '           instance_name,' + @LineFeed
+                + '           LEFT(counter_name, CHARINDEX(''''BASE'''', UPPER(counter_name))-1) AS counter_join,' + @LineFeed
+                + '           CheckDate,' + @LineFeed
+                + '           cntr_delta' + @LineFeed
+                + '    FROM   ' + @OutputSchemaName + '.' + @OutputTableNamePerfmonStats_View + '' + @LineFeed
+                + '    WHERE  cntr_type IN(1073939712)' + @LineFeed
+                + '    AND cntr_delta <> 0' + @LineFeed
+                + '),' + @LineFeed
+                + 'PERF_AVERAGE_FRACTION AS' + @LineFeed
+                + '(' + @LineFeed
+                + '    SELECT ServerName,' + @LineFeed
+                + '           object_name,' + @LineFeed
+                + '           instance_name,' + @LineFeed
+                + '           counter_name,' + @LineFeed
+                + '           counter_name AS counter_join,' + @LineFeed
+                + '           CheckDate,' + @LineFeed
+                + '           cntr_delta' + @LineFeed
+                + '    FROM   ' + @OutputSchemaName + '.' + @OutputTableNamePerfmonStats_View + '' + @LineFeed
+                + '    WHERE  cntr_type IN(537003264)' + @LineFeed
+                + '    AND cntr_delta <> 0' + @LineFeed
+                + '),' + @LineFeed
+                + 'PERF_COUNTER_BULK_COUNT AS' + @LineFeed
+                + '(' + @LineFeed
+                + '    SELECT ServerName,' + @LineFeed
+                + '           object_name,' + @LineFeed
+                + '           instance_name,' + @LineFeed
+                + '           counter_name,' + @LineFeed
+                + '           CheckDate,' + @LineFeed
+                + '           cntr_delta / ElapsedSeconds AS cntr_value' + @LineFeed
+                + '    FROM   ' + @OutputSchemaName + '.' + @OutputTableNamePerfmonStats_View + '' + @LineFeed
+                + '    WHERE  cntr_type IN(272696576, 272696320)' + @LineFeed
+                + '    AND cntr_delta <> 0' + @LineFeed
+                + '),' + @LineFeed
+                + 'PERF_COUNTER_RAWCOUNT AS' + @LineFeed
+                + '(' + @LineFeed
+                + '    SELECT ServerName,' + @LineFeed
+                + '           object_name,' + @LineFeed
+                + '           instance_name,' + @LineFeed
+                + '           counter_name,' + @LineFeed
+                + '           CheckDate,' + @LineFeed
+                + '           cntr_value' + @LineFeed
+                + '    FROM   ' + @OutputSchemaName + '.' + @OutputTableNamePerfmonStats_View + '' + @LineFeed
+                + '    WHERE  cntr_type IN(65792, 65536)' + @LineFeed
+                + ')' + @LineFeed
+                + '' + @LineFeed
+                + 'SELECT NUM.ServerName,' + @LineFeed
+                + '       NUM.object_name,' + @LineFeed
+                + '       NUM.counter_name,' + @LineFeed
+                + '       NUM.instance_name,' + @LineFeed
+                + '       NUM.CheckDate,' + @LineFeed
+                + '       NUM.cntr_delta / DEN.cntr_delta AS cntr_value' + @LineFeed
+                + '       ' + @LineFeed
+                + 'FROM   PERF_AVERAGE_BULK AS NUM' + @LineFeed
+                + '       JOIN PERF_LARGE_RAW_BASE AS DEN ON NUM.counter_join = DEN.counter_join' + @LineFeed
+                + '                                          AND NUM.CheckDate = DEN.CheckDate' + @LineFeed
+                + '                                          AND NUM.ServerName = DEN.ServerName' + @LineFeed
+                + '                                          AND NUM.object_name = DEN.object_name' + @LineFeed
+                + '                                          AND NUM.instance_name = DEN.instance_name' + @LineFeed
+                + '                                          AND DEN.cntr_delta <> 0' + @LineFeed
+                + '' + @LineFeed
+                + 'UNION ALL' + @LineFeed
+                + '' + @LineFeed
+                + 'SELECT NUM.ServerName,' + @LineFeed
+                + '       NUM.object_name,' + @LineFeed
+                + '       NUM.counter_name,' + @LineFeed
+                + '       NUM.instance_name,' + @LineFeed
+                + '       NUM.CheckDate,' + @LineFeed
+                + '       CAST((CAST(NUM.cntr_delta as DECIMAL(19)) / DEN.cntr_delta) as decimal(23,3))  AS cntr_value' +         @LineFeed
+                + 'FROM   PERF_AVERAGE_FRACTION AS NUM' + @LineFeed
+                + '       JOIN PERF_LARGE_RAW_BASE AS DEN ON NUM.counter_join = DEN.counter_join' + @LineFeed
+                + '                                          AND NUM.CheckDate = DEN.CheckDate' + @LineFeed
+                + '                                          AND NUM.ServerName = DEN.ServerName' + @LineFeed
+                + '                                          AND NUM.object_name = DEN.object_name' + @LineFeed
+                + '                                          AND NUM.instance_name = DEN.instance_name' + @LineFeed
+                + '                                          AND DEN.cntr_delta <> 0' + @LineFeed
+                + 'UNION ALL' + @LineFeed
+                + '' + @LineFeed
+                + 'SELECT ServerName,' + @LineFeed
+                + '       object_name,' + @LineFeed
+                + '       counter_name,' + @LineFeed
+                + '       instance_name,' + @LineFeed
+                + '       CheckDate,' + @LineFeed
+                + '       cntr_value' + @LineFeed
+                + 'FROM   PERF_COUNTER_BULK_COUNT' + @LineFeed
+                + '' + @LineFeed
+                + 'UNION ALL' + @LineFeed
+                + '' + @LineFeed
+                + 'SELECT ServerName,' + @LineFeed
+                + '       object_name,' + @LineFeed
+                + '       counter_name,' + @LineFeed
+                + '       instance_name,' + @LineFeed
+                + '       CheckDate,' + @LineFeed
+                + '       cntr_value' + @LineFeed
+                + 'FROM   PERF_COUNTER_RAWCOUNT;'')';
+
+			EXEC(@StringToExecute);
             END;
+
 
         SET @StringToExecute = N' IF EXISTS(SELECT * FROM '
             + @OutputDatabaseName
@@ -21022,11 +21724,12 @@ BEGIN
             + @OutputDatabaseName + '.'
             + @OutputSchemaName + '.'
             + @OutputTableNamePerfmonStats
-            + ' (ServerName, CheckDate, object_name, counter_name, instance_name, cntr_value, cntr_type, value_delta, value_per_second) SELECT '''
-            + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''', ''' + CONVERT(NVARCHAR(100), @StartSampleTime, 121) + ''', '
-            + 'object_name, counter_name, instance_name, cntr_value, cntr_type, value_delta, value_per_second FROM #PerfmonStats WHERE Pass = 2';
-        EXEC(@StringToExecute);
+            + ' (ServerName, CheckDate, object_name, counter_name, instance_name, cntr_value, cntr_type, value_delta, value_per_second) SELECT '
+            + ' @SrvName, @CheckDate, object_name, counter_name, instance_name, cntr_value, cntr_type, value_delta, value_per_second FROM #PerfmonStats WHERE Pass = 2';
+
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate datetimeoffset',
+			@@SERVERNAME, @StartSampleTime;
 
         /* Delete history older than @OutputTableRetentionDays */
         SET @StringToExecute = N' IF EXISTS(SELECT * FROM '
@@ -21036,14 +21739,15 @@ BEGIN
             + @OutputDatabaseName + '.'
             + @OutputSchemaName + '.'
             + @OutputTableNamePerfmonStats
-            + ' WHERE ServerName = '''
-            + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''' AND CheckDate < ''' + CAST(CAST( (DATEADD(DAY, -1 * @OutputTableRetentionDays, GETDATE() ) ) AS DATE) AS NVARCHAR(20)) + ''';';
-        EXEC(@StringToExecute);
+            + ' WHERE ServerName = @SrvName AND CheckDate < @CheckDate ;';
+
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate date',
+			@@SERVERNAME, @OutputTableCleanupDate;
 
 
 
-    END
+    END;
     ELSE IF (SUBSTRING(@OutputTableNamePerfmonStats, 2, 2) = '##')
     BEGIN
         SET @StringToExecute = N' IF (OBJECT_ID(''tempdb..'
@@ -21060,19 +21764,21 @@ BEGIN
                 [cntr_type] INT NOT NULL,
                 [value_delta] BIGINT NULL,
                 [value_per_second] DECIMAL(18,2) NULL,
-                CONSTRAINT [PK_' + CAST(NEWID() AS CHAR(36)) + '] PRIMARY KEY CLUSTERED (ID ASC));'
+                PRIMARY KEY CLUSTERED (ID ASC));'
             + ' INSERT '
             + @OutputTableNamePerfmonStats
-            + ' (ServerName, CheckDate, object_name, counter_name, instance_name, cntr_value, cntr_type, value_delta, value_per_second) SELECT '''
+            + ' (ServerName, CheckDate, object_name, counter_name, instance_name, cntr_value, cntr_type, value_delta, value_per_second) SELECT '
             + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''', ''' + CONVERT(NVARCHAR(100), @StartSampleTime, 121) + ''', '
-            + 'object_name, counter_name, instance_name, cntr_value, cntr_type, value_delta, value_per_second FROM #PerfmonStats WHERE Pass = 2';
-        EXEC(@StringToExecute);
-    END
+            + ' @SrvName, @CheckDate, object_name, counter_name, instance_name, cntr_value, cntr_type, value_delta, value_per_second FROM #PerfmonStats WHERE Pass = 2';
+
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate datetimeoffset',
+			@@SERVERNAME, @StartSampleTime;
+    END;
     ELSE IF (SUBSTRING(@OutputTableNamePerfmonStats, 2, 1) = '#')
     BEGIN
-        RAISERROR('Due to the nature of Dymamic SQL, only global (i.e. double pound (##)) temp tables are supported for @OutputTableName', 16, 0)
-    END
+        RAISERROR('Due to the nature of Dymamic SQL, only global (i.e. double pound (##)) temp tables are supported for @OutputTableName', 16, 0);
+    END;
 
 
     /* @OutputTableNameWaitStats lets us export the results to a permanent table */
@@ -21107,10 +21813,10 @@ BEGIN
                 wait_time_ms BIGINT,
                 signal_wait_time_ms BIGINT,
                 waiting_tasks_count BIGINT ,
-                CONSTRAINT [PK_' + CAST(NEWID() AS CHAR(36)) + '] PRIMARY KEY CLUSTERED (ID));' + @LineFeed
+                PRIMARY KEY CLUSTERED (ID));' + @LineFeed
 			+ 'CREATE NONCLUSTERED INDEX IX_ServerName_wait_type_CheckDate_Includes ON ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats + @LineFeed
 			+ '(ServerName, wait_type, CheckDate) INCLUDE (wait_time_ms, signal_wait_time_ms, waiting_tasks_count);' + @LineFeed
-			+ 'END'
+			+ 'END';
 
         EXEC(@StringToExecute);
 
@@ -21122,9 +21828,10 @@ BEGIN
                 + @OutputDatabaseName
                 + '; EXEC (''CREATE TABLE '
                 + @OutputSchemaName + '.'
-                + @OutputTableNameWaitStats_Categories + ' (WaitType NVARCHAR(60) PRIMARY KEY CLUSTERED, WaitCategory NVARCHAR(128) NOT NULL, Ignorable BIT DEFAULT 0);'')'
-            EXEC(@StringToExecute);
-            END
+                + @OutputTableNameWaitStats_Categories + ' (WaitType NVARCHAR(60) PRIMARY KEY CLUSTERED, WaitCategory NVARCHAR(128) NOT NULL, Ignorable BIT DEFAULT 0);'')';
+
+			EXEC(@StringToExecute);
+            END;
 
 		/* Make sure the wait stats category table has the current number of rows */
 		SET @StringToExecute = 'USE '
@@ -21133,8 +21840,9 @@ BEGIN
 			+ 'BEGIN ' + @LineFeed
 			+ 'TRUNCATE TABLE '  + @OutputSchemaName + '.' + @OutputTableNameWaitStats_Categories + @LineFeed
 			+ 'INSERT INTO ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats_Categories + ' (WaitType, WaitCategory, Ignorable) SELECT WaitType, WaitCategory, Ignorable FROM ##WaitCategories;' + @LineFeed
-			+ 'END'')'
-        EXEC(@StringToExecute);
+			+ 'END'')';
+
+		EXEC(@StringToExecute);
 
 
         /* Create the wait stats view */
@@ -21146,6 +21854,22 @@ BEGIN
                 + '; EXEC (''CREATE VIEW '
                 + @OutputSchemaName + '.'
                 + @OutputTableNameWaitStats_View + ' AS ' + @LineFeed
+                + 'WITH RowDates as' + @LineFeed
+                + '(' + @LineFeed
+                + '        SELECT ' + @LineFeed
+                + '                ROW_NUMBER() OVER (ORDER BY [CheckDate]) ID,' + @LineFeed
+                + '                [CheckDate]' + @LineFeed
+                + '        FROM ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats + @LineFeed
+                + '        GROUP BY [CheckDate]' + @LineFeed
+                + '),' + @LineFeed
+                + 'CheckDates as' + @LineFeed
+                + '(' + @LineFeed
+                + '        SELECT ThisDate.CheckDate,' + @LineFeed
+                + '               LastDate.CheckDate as PreviousCheckDate' + @LineFeed
+                + '        FROM RowDates ThisDate' + @LineFeed
+                + '        JOIN RowDates LastDate' + @LineFeed
+                + '        ON ThisDate.ID = LastDate.ID + 1' + @LineFeed
+                + ')' + @LineFeed
                 + 'SELECT w.ServerName, w.CheckDate, w.wait_type, COALESCE(wc.WaitCategory, ''''Other'''') AS WaitCategory, COALESCE(wc.Ignorable,0) AS Ignorable' + @LineFeed
                 + ', DATEDIFF(ss, wPrior.CheckDate, w.CheckDate) AS ElapsedSeconds' + @LineFeed
                 + ', (w.wait_time_ms - wPrior.wait_time_ms) AS wait_time_ms_delta' + @LineFeed
@@ -21154,12 +21878,15 @@ BEGIN
                 + ', (w.signal_wait_time_ms - wPrior.signal_wait_time_ms) AS signal_wait_time_ms_delta' + @LineFeed
                 + ', (w.waiting_tasks_count - wPrior.waiting_tasks_count) AS waiting_tasks_count_delta' + @LineFeed
                 + 'FROM ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats + ' w' + @LineFeed
-                + 'INNER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats + ' wPrior ON w.ServerName = wPrior.ServerName AND w.wait_type = wPrior.wait_type AND w.CheckDate > wPrior.CheckDate' + @LineFeed
-                + 'LEFT OUTER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats + ' wMiddle ON w.ServerName = wMiddle.ServerName AND w.wait_type = wMiddle.wait_type AND w.CheckDate > wMiddle.CheckDate AND wMiddle.CheckDate > wPrior.CheckDate' + @LineFeed
-				+ 'LEFT OUTER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats_Categories + ' wc ON w.wait_type = wc.WaitType' + @LineFeed
-                + 'WHERE wMiddle.ID IS NULL AND w.wait_time_ms >= wPrior.wait_time_ms AND DATEDIFF(MI, wPrior.CheckDate, w.CheckDate) BETWEEN 1 AND 60;'')'
-            EXEC(@StringToExecute);
-            END
+                + 'INNER HASH JOIN CheckDates Dates' + @LineFeed
+                + 'ON Dates.CheckDate = w.CheckDate' + @LineFeed
+                + 'INNER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats + ' wPrior ON w.ServerName = wPrior.ServerName AND w.wait_type = wPrior.wait_type AND Dates.PreviousCheckDate = wPrior.CheckDate' + @LineFeed
+			 + 'LEFT OUTER JOIN ' + @OutputSchemaName + '.' + @OutputTableNameWaitStats_Categories + ' wc ON w.wait_type = wc.WaitType' + @LineFeed
+                + 'WHERE DATEDIFF(MI, wPrior.CheckDate, w.CheckDate) BETWEEN 1 AND 60' + @LineFeed
+                + 'AND [w].[wait_time_ms] >= [wPrior].[wait_time_ms];'')'
+
+			EXEC(@StringToExecute);
+            END;
 
 
         SET @StringToExecute = N' IF EXISTS(SELECT * FROM '
@@ -21169,11 +21896,12 @@ BEGIN
             + @OutputDatabaseName + '.'
             + @OutputSchemaName + '.'
             + @OutputTableNameWaitStats
-            + ' (ServerName, CheckDate, wait_type, wait_time_ms, signal_wait_time_ms, waiting_tasks_count) SELECT '''
-            + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''', ''' + CONVERT(NVARCHAR(100), @StartSampleTime, 121) + ''', '
-            + 'wait_type, wait_time_ms, signal_wait_time_ms, waiting_tasks_count FROM #WaitStats WHERE Pass = 2 AND wait_time_ms > 0 AND waiting_tasks_count > 0';
-        EXEC(@StringToExecute);
+            + ' (ServerName, CheckDate, wait_type, wait_time_ms, signal_wait_time_ms, waiting_tasks_count) SELECT '
+            + ' @SrvName, @CheckDate, wait_type, wait_time_ms, signal_wait_time_ms, waiting_tasks_count FROM #WaitStats WHERE Pass = 2 AND wait_time_ms > 0 AND waiting_tasks_count > 0';
+
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate datetimeoffset',
+			@@SERVERNAME, @StartSampleTime;
 
         /* Delete history older than @OutputTableRetentionDays */
         SET @StringToExecute = N' IF EXISTS(SELECT * FROM '
@@ -21183,12 +21911,13 @@ BEGIN
             + @OutputDatabaseName + '.'
             + @OutputSchemaName + '.'
             + @OutputTableNameWaitStats
-            + ' WHERE ServerName = '''
-            + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''' AND CheckDate < ''' + CAST(CAST( (DATEADD(DAY, -1 * @OutputTableRetentionDays, GETDATE() ) ) AS DATE) AS NVARCHAR(20)) + ''';';
-        EXEC(@StringToExecute);
+            + ' WHERE ServerName = @SrvName AND CheckDate < @CheckDate ;';
 
-    END
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate date',
+			@@SERVERNAME, @OutputTableCleanupDate;
+
+    END;
     ELSE IF (SUBSTRING(@OutputTableNameWaitStats, 2, 2) = '##')
     BEGIN
         SET @StringToExecute = N' IF (OBJECT_ID(''tempdb..'
@@ -21202,19 +21931,20 @@ BEGIN
                 wait_time_ms BIGINT,
                 signal_wait_time_ms BIGINT,
                 waiting_tasks_count BIGINT ,
-                CONSTRAINT [PK_' + CAST(NEWID() AS CHAR(36)) + '] PRIMARY KEY CLUSTERED (ID ASC));'
+                PRIMARY KEY CLUSTERED (ID ASC));'
             + ' INSERT '
             + @OutputTableNameWaitStats
-            + ' (ServerName, CheckDate, wait_type, wait_time_ms, signal_wait_time_ms, waiting_tasks_count) SELECT '''
-            + CAST(SERVERPROPERTY('ServerName') AS NVARCHAR(128))
-            + ''', ''' + CONVERT(NVARCHAR(100), @StartSampleTime, 121) + ''', '
-            + 'wait_type, wait_time_ms, signal_wait_time_ms, waiting_tasks_count FROM #WaitStats WHERE Pass = 2 AND wait_time_ms > 0 AND waiting_tasks_count > 0';
-        EXEC(@StringToExecute);
-    END
+            + ' (ServerName, CheckDate, wait_type, wait_time_ms, signal_wait_time_ms, waiting_tasks_count) SELECT '
+            + ' @SrvName, @CheckDate, wait_type, wait_time_ms, signal_wait_time_ms, waiting_tasks_count FROM #WaitStats WHERE Pass = 2 AND wait_time_ms > 0 AND waiting_tasks_count > 0';
+
+		EXEC sp_executesql @StringToExecute,
+			N'@SrvName NVARCHAR(128), @CheckDate datetimeoffset',
+			@@SERVERNAME, @StartSampleTime;
+    END;
     ELSE IF (SUBSTRING(@OutputTableNameWaitStats, 2, 1) = '#')
     BEGIN
-        RAISERROR('Due to the nature of Dymamic SQL, only global (i.e. double pound (##)) temp tables are supported for @OutputTableName', 16, 0)
-    END
+        RAISERROR('Due to the nature of Dymamic SQL, only global (i.e. double pound (##)) temp tables are supported for @OutputTableName', 16, 0);
+    END;
 
 
 
@@ -21228,8 +21958,8 @@ BEGIN
     IF @OutputType = 'COUNT' AND @SinceStartup = 0
     BEGIN
         SELECT  COUNT(*) AS Warnings
-        FROM    #BlitzFirstResults
-    END
+        FROM    #BlitzFirstResults;
+    END;
     ELSE
         IF @OutputType = 'Opserver1' AND @SinceStartup = 0
         BEGIN
@@ -21287,7 +22017,7 @@ BEGIN
                     END DESC,
                     r.Finding,
                     r.ID;
-        END
+        END;
         ELSE IF @OutputType IN ( 'CSV', 'RSV' ) AND @SinceStartup = 0
         BEGIN
 
@@ -21308,7 +22038,7 @@ BEGIN
                     END DESC,
                     Finding,
                     Details;
-        END
+        END;
         ELSE IF @ExpertMode = 0 AND @OutputXMLasNVARCHAR = 0 AND @SinceStartup = 0
         BEGIN
             SELECT  [Priority] ,
@@ -21329,7 +22059,7 @@ BEGIN
                     END DESC,
                     Finding,
                     ID;
-        END
+        END;
         ELSE IF @ExpertMode = 0 AND @OutputXMLasNVARCHAR = 1 AND @SinceStartup = 0
         BEGIN
             SELECT  [Priority] ,
@@ -21350,7 +22080,7 @@ BEGIN
                     END DESC,
                     Finding,
                     ID;
-        END
+        END;
         ELSE IF @ExpertMode = 1
         BEGIN
             IF @SinceStartup = 0
@@ -21437,7 +22167,7 @@ BEGIN
                         CAST((wd2.wait_time_ms-wd1.wait_time_ms)/
                             (1.0*(wd2.waiting_tasks_count - wd1.waiting_tasks_count)) AS NUMERIC(12,1))
                     ELSE 0 END AS [Avg ms Per Wait],
-                    N'http://www.brentozar.com/sql/wait-stats/#' + wd1.wait_type AS URL
+                    N'https://www.sqlskills.com/help/waits/' + LOWER(wd1.wait_type) + '/' AS URL
                 FROM  max_batch b
                 JOIN #WaitStats wd2 ON
                     wd2.SampleTime =b.SampleTime
@@ -21452,7 +22182,7 @@ BEGIN
                 WHERE (wd2.waiting_tasks_count - wd1.waiting_tasks_count) > 0
                     AND wd2.wait_time_ms-wd1.wait_time_ms > 0
                 ORDER BY [Wait Time (Seconds)] DESC;
-                END
+                END;
             ELSE
                 BEGIN
                 /* Measure waits in seconds */
@@ -21478,7 +22208,7 @@ BEGIN
                         CAST((wd2.wait_time_ms-wd1.wait_time_ms)/
                             (1.0*(wd2.waiting_tasks_count - wd1.waiting_tasks_count)) AS NUMERIC(12,1))
                     ELSE 0 END AS [Avg ms Per Wait],
-                    N'http://www.brentozar.com/sql/wait-stats/#' + wd1.wait_type AS URL
+                    N'https://www.sqlskills.com/help/waits/' + LOWER(wd1.wait_type) + '/' AS URL
                 FROM  max_batch b
                 JOIN #WaitStats wd2 ON
                     wd2.SampleTime =b.SampleTime
@@ -21564,7 +22294,7 @@ BEGIN
                     INNER JOIN #PerfmonStats pFirst ON pFirst.[object_name] = pLast.[object_name] AND pFirst.counter_name = pLast.counter_name AND (pFirst.instance_name = pLast.instance_name OR (pFirst.instance_name IS NULL AND pLast.instance_name IS NULL))
                     AND pLast.ID > pFirst.ID
 				WHERE pLast.cntr_value <> pFirst.cntr_value
-                ORDER BY Pattern, pLast.[object_name], pLast.counter_name, pLast.instance_name
+                ORDER BY Pattern, pLast.[object_name], pLast.counter_name, pLast.instance_name;
 
 
             -------------------------
@@ -21576,13 +22306,13 @@ BEGIN
 			SELECT qsNow.*, qsFirst.*
             FROM #QueryStats qsNow
               INNER JOIN #QueryStats qsFirst ON qsNow.[sql_handle] = qsFirst.[sql_handle] AND qsNow.statement_start_offset = qsFirst.statement_start_offset AND qsNow.statement_end_offset = qsFirst.statement_end_offset AND qsNow.plan_generation_num = qsFirst.plan_generation_num AND qsNow.plan_handle = qsFirst.plan_handle AND qsFirst.Pass = 1
-            WHERE qsNow.Pass = 2
-			END
+            WHERE qsNow.Pass = 2;
+			END;
 			ELSE
 			BEGIN
-			SELECT 'Plan Cache' AS [Pattern], 'Plan cache not analyzed' AS [Finding], 'Use @CheckProcedureCache = 1 or run sp_BlitzCache for more analysis' AS [More Info], CONVERT(XML, @StockDetailsHeader + 'firstresponderkit.org' + @StockDetailsFooter) AS [Details]
-			END
-        END
+			SELECT 'Plan Cache' AS [Pattern], 'Plan cache not analyzed' AS [Finding], 'Use @CheckProcedureCache = 1 or run sp_BlitzCache for more analysis' AS [More Info], CONVERT(XML, @StockDetailsHeader + 'firstresponderkit.org' + @StockDetailsFooter) AS [Details];
+			END;
+        END;
 
     DROP TABLE #BlitzFirstResults;
 
@@ -21592,16 +22322,16 @@ IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1
     BEGIN
 		IF OBJECT_ID('master.dbo.sp_BlitzWho') IS NULL AND OBJECT_ID('dbo.sp_BlitzWho') IS NULL
 		BEGIN
-			PRINT N'sp_BlitzWho is not installed in the current database_files.  You can get a copy from http://FirstResponderKit.org'
-		END
+			PRINT N'sp_BlitzWho is not installed in the current database_files.  You can get a copy from http://FirstResponderKit.org';
+		END;
 		ELSE
 		BEGIN
-			EXEC (@BlitzWho)
-		END
-    END /* IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1   -   What's running right now? This is the first and last result set. */
+			EXEC (@BlitzWho);
+		END;
+    END; /* IF @SinceStartup = 0 AND @Seconds > 0 AND @ExpertMode = 1   -   What's running right now? This is the first and last result set. */
 
-END /* IF @LogMessage IS NULL */
-END /* ELSE IF @OutputType = 'SCHEMA' */
+END; /* IF @LogMessage IS NULL */
+END; /* ELSE IF @OutputType = 'SCHEMA' */
 
 SET NOCOUNT OFF;
 GO
@@ -21663,8 +22393,8 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE @Version VARCHAR(30);
-SET @Version = '6.3';
-SET @VersionDate = '20180301';
+SET @Version = '6.5';
+SET @VersionDate = '20180501';
 
 
 IF @Help = 1 PRINT '
@@ -21799,10 +22529,10 @@ IF OBJECT_ID('tempdb..#TemporalTables') IS NOT NULL
               check_id INT NOT NULL,
               index_sanity_id INT NULL,
               Priority INT NULL,
-              findings_group VARCHAR(4000) NOT NULL,
-              finding VARCHAR(200) NOT NULL,
-              [database_name] VARCHAR(200) NULL,
-              URL VARCHAR(200) NOT NULL,
+              findings_group NVARCHAR(4000) NOT NULL,
+              finding NVARCHAR(200) NOT NULL,
+              [database_name] NVARCHAR(128) NULL,
+              URL NVARCHAR(200) NOT NULL,
               details NVARCHAR(MAX) NOT NULL,
               index_definition NVARCHAR(MAX) NOT NULL,
               secret_columns NVARCHAR(MAX) NULL,
@@ -21856,11 +22586,11 @@ IF OBJECT_ID('tempdb..#TemporalTables') IS NOT NULL
               count_secret_columns INT NULL,
               create_date DATETIME NOT NULL,
               modify_date DATETIME NOT NULL,
-            [db_schema_object_name] AS [schema_name] + '.' + [object_name]  ,
-            [db_schema_object_indexid] AS [schema_name] + '.' + [object_name]
-                + CASE WHEN [index_name] IS NOT NULL THEN '.' + index_name
-                ELSE ''
-                END + ' (' + CAST(index_id AS NVARCHAR(20)) + ')' ,
+            [db_schema_object_name] AS [schema_name] + N'.' + [object_name]  ,
+            [db_schema_object_indexid] AS [schema_name] + N'.' + [object_name]
+                + CASE WHEN [index_name] IS NOT NULL THEN N'.' + index_name
+                ELSE N''
+                END + N' (' + CAST(index_id AS NVARCHAR(20)) + N')' ,
             first_key_column_name AS CASE    WHEN count_key_columns > 1
                 THEN LEFT(key_column_names, CHARINDEX(',', key_column_names, 0) - 1)
                 ELSE key_column_names
@@ -21873,7 +22603,7 @@ IF OBJECT_ID('tempdb..#TemporalTables') IS NOT NULL
                 CASE index_id
                     WHEN 0 THEN N'[HEAP] '
                     WHEN 1 THEN N'[CX] '
-                    ELSE N'' END + CASE WHEN is_indexed_view = 1 THEN '[VIEW] '
+                    ELSE N'' END + CASE WHEN is_indexed_view = 1 THEN N'[VIEW] '
                     ELSE N'' END + CASE WHEN is_primary_key = 1 THEN N'[PK] '
                     ELSE N'' END + CASE WHEN is_XML = 1 THEN N'[XML] '
                     ELSE N'' END + CASE WHEN is_spatial = 1 THEN N'[SPATIAL] '
@@ -21882,11 +22612,11 @@ IF OBJECT_ID('tempdb..#TemporalTables') IS NOT NULL
                     ELSE N'' END + CASE WHEN is_hypothetical = 1 THEN N'[HYPOTHETICAL] '
                     ELSE N'' END + CASE WHEN is_unique = 1 AND is_primary_key = 0 THEN N'[UNIQUE] '
                     ELSE N'' END + CASE WHEN count_key_columns > 0 THEN 
-                        N'[' + CAST(count_key_columns AS VARCHAR(10)) + N' KEY' 
+                        N'[' + CAST(count_key_columns AS NVARCHAR(10)) + N' KEY' 
                             + CASE WHEN count_key_columns > 1 THEN  N'S' ELSE N'' END
                             + N'] ' + LTRIM(key_column_names_with_sort_order)
                     ELSE N'' END + CASE WHEN count_included_columns > 0 THEN 
-                        N' [' + CAST(count_included_columns AS VARCHAR(10))  + N' INCLUDE' + 
+                        N' [' + CAST(count_included_columns AS NVARCHAR(10))  + N' INCLUDE' + 
                             + CASE WHEN count_included_columns > 1 THEN  N'S' ELSE N'' END                    
                             + N'] ' + include_column_names
                     ELSE N'' END + CASE WHEN filter_definition <> N'' THEN N' [FILTER] ' + filter_definition
@@ -21896,20 +22626,20 @@ IF OBJECT_ID('tempdb..#TemporalTables') IS NOT NULL
                 THEN ( user_seeks + user_scans + user_lookups )  / (1.0 * user_updates)
                 ELSE 0 END AS MONEY) ,
             [index_usage_summary] AS N'Reads: ' + 
-                REPLACE(CONVERT(NVARCHAR(30),CAST((user_seeks + user_scans + user_lookups) AS MONEY), 1), '.00', '')
+                REPLACE(CONVERT(NVARCHAR(30),CAST((user_seeks + user_scans + user_lookups) AS MONEY), 1), N'.00', N'')
                 + CASE WHEN user_seeks + user_scans + user_lookups > 0 THEN
                     N' (' 
                         + RTRIM(
-                        CASE WHEN user_seeks > 0 THEN REPLACE(CONVERT(NVARCHAR(30),CAST((user_seeks) AS MONEY), 1), '.00', '') + N' seek ' ELSE N'' END
-                        + CASE WHEN user_scans > 0 THEN REPLACE(CONVERT(NVARCHAR(30),CAST((user_scans) AS MONEY), 1), '.00', '') + N' scan '  ELSE N'' END
-                        + CASE WHEN user_lookups > 0 THEN  REPLACE(CONVERT(NVARCHAR(30),CAST((user_lookups) AS MONEY), 1), '.00', '') + N' lookup' ELSE N'' END
+                        CASE WHEN user_seeks > 0 THEN REPLACE(CONVERT(NVARCHAR(30),CAST((user_seeks) AS MONEY), 1), N'.00', N'') + N' seek ' ELSE N'' END
+                        + CASE WHEN user_scans > 0 THEN REPLACE(CONVERT(NVARCHAR(30),CAST((user_scans) AS MONEY), 1), N'.00', N'') + N' scan '  ELSE N'' END
+                        + CASE WHEN user_lookups > 0 THEN  REPLACE(CONVERT(NVARCHAR(30),CAST((user_lookups) AS MONEY), 1), N'.00', N'') + N' lookup' ELSE N'' END
                         )
                         + N') '
                     ELSE N' ' END 
                 + N'Writes:' + 
-                REPLACE(CONVERT(NVARCHAR(30),CAST(user_updates AS MONEY), 1), '.00', ''),
-            [more_info] AS N'EXEC dbo.sp_BlitzIndex @DatabaseName=' + QUOTENAME([database_name],'''') + 
-                N', @SchemaName=' + QUOTENAME([schema_name],'''') + N', @TableName=' + QUOTENAME([object_name],'''') + N';'
+                REPLACE(CONVERT(NVARCHAR(30),CAST(user_updates AS MONEY), 1), N'.00', N''),
+            [more_info] AS N'EXEC dbo.sp_BlitzIndex @DatabaseName=' + QUOTENAME([database_name],N'''') + 
+                N', @SchemaName=' + QUOTENAME([schema_name],N'''') + N', @TableName=' + QUOTENAME([object_name],N'''') + N';'
 		);
         RAISERROR (N'Adding UQ index on #IndexSanity (database_id, object_id, index_id)',0,1) WITH NOWAIT;
         IF NOT EXISTS(SELECT 1 FROM tempdb.sys.indexes WHERE name='uq_database_id_object_id_index_id') 
@@ -21947,7 +22677,7 @@ IF OBJECT_ID('tempdb..#TemporalTables') IS NOT NULL
               page_lock_wait_in_ms BIGINT NULL ,
               index_lock_promotion_attempt_count BIGINT NULL ,
               index_lock_promotion_count BIGINT NULL,
-              data_compression_desc VARCHAR(60) NULL
+              data_compression_desc NVARCHAR(60) NULL
             );
 
         CREATE TABLE #IndexSanitySize
@@ -21976,7 +22706,7 @@ IF OBJECT_ID('tempdb..#TemporalTables') IS NOT NULL
               avg_page_lock_wait_in_ms BIGINT NULL ,
                total_index_lock_promotion_attempt_count BIGINT NULL ,
               total_index_lock_promotion_count BIGINT NULL ,
-              data_compression_desc VARCHAR(8000) NULL,
+              data_compression_desc NVARCHAR(4000) NULL,
               index_size_summary AS ISNULL(
                 CASE WHEN partition_count > 1
                         THEN N'[' + CAST(partition_count AS NVARCHAR(10)) + N' PARTITIONS] '
@@ -22171,7 +22901,7 @@ IF OBJECT_ID('tempdb..#TemporalTables') IS NOT NULL
 
 		CREATE TABLE #PartitionCompressionInfo (
 			[index_sanity_id] INT NULL,
-			[partition_compression_detail] VARCHAR(8000) NULL
+			[partition_compression_detail] NVARCHAR(4000) NULL
         );
 
 		CREATE TABLE #Statistics (
@@ -22180,7 +22910,7 @@ IF OBJECT_ID('tempdb..#TemporalTables') IS NOT NULL
 		  table_name NVARCHAR(128) NULL,
 		  schema_name NVARCHAR(128) NULL,
 		  index_name  NVARCHAR(128) NULL,
-		  column_names  NVARCHAR(4000) NULL,
+		  column_names  NVARCHAR(MAX) NULL,
 		  statistics_name NVARCHAR(128) NULL,
 		  last_statistics_update DATETIME NULL,
 		  days_since_last_stats_update INT NULL,
@@ -22218,7 +22948,7 @@ IF OBJECT_ID('tempdb..#TemporalTables') IS NOT NULL
 		
 		CREATE TABLE #TraceStatus
 		(
-		 TraceFlag VARCHAR(10) ,
+		 TraceFlag NVARCHAR(10) ,
 		 status BIT ,
 		 Global BIT ,
 		 Session BIT
@@ -22591,13 +23321,13 @@ BEGIN TRY
             column_name, system_type_name, max_length, precision, scale, collation_name, is_nullable, is_identity, is_computed,
             is_replicated, is_sparse, is_filestream )
                 EXEC sp_executesql @dsql;
-                    
+           
         SET @dsql = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-                SELECT    ' + CAST(@DatabaseID AS NVARCHAR(10)) + ' AS database_id, 
+                SELECT    ' + CAST(@DatabaseID AS NVARCHAR(10)) + N' AS database_id, 
                         so.object_id, 
                         si.index_id, 
                         si.type,
-                        ' + QUOTENAME(@DatabaseName, '''') + ' AS database_name, 
+                        @i_DatabaseName AS database_name, 
                         COALESCE(sc.NAME, ''Unknown'') AS [schema_name],
                         COALESCE(so.name, ''Unknown'') AS [object_name], 
                         COALESCE(si.name, ''Unknown'') AS [index_name],
@@ -22612,26 +23342,26 @@ BEGIN TRY
                         si.is_hypothetical, 
                         si.is_padded, 
                         si.fill_factor,'
-                        + CASE WHEN @SQLServerProductVersion NOT LIKE '9%' THEN '
+                        + CASE WHEN @SQLServerProductVersion NOT LIKE '9%' THEN N'
                         CASE WHEN si.filter_definition IS NOT NULL THEN si.filter_definition
-                             ELSE ''''
-                        END AS filter_definition' ELSE ''''' AS filter_definition' END + '
+                             ELSE N''''
+                        END AS filter_definition' ELSE N''''' AS filter_definition' END + N'
                         , ISNULL(us.user_seeks, 0), ISNULL(us.user_scans, 0),
                         ISNULL(us.user_lookups, 0), ISNULL(us.user_updates, 0), us.last_user_seek, us.last_user_scan,
                         us.last_user_lookup, us.last_user_update,
                         so.create_date, so.modify_date
-                FROM    ' + QUOTENAME(@DatabaseName) + '.sys.indexes AS si WITH (NOLOCK)
-                        JOIN ' + QUOTENAME(@DatabaseName) + '.sys.objects AS so WITH (NOLOCK) ON si.object_id = so.object_id
+                FROM    ' + QUOTENAME(@DatabaseName) + N'.sys.indexes AS si WITH (NOLOCK)
+                        JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.objects AS so WITH (NOLOCK) ON si.object_id = so.object_id
                                                AND so.is_ms_shipped = 0 /*Exclude objects shipped by Microsoft*/
                                                AND so.type <> ''TF'' /*Exclude table valued functions*/
-                        JOIN ' + QUOTENAME(@DatabaseName) + '.sys.schemas sc ON so.schema_id = sc.schema_id
+                        JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.schemas sc ON so.schema_id = sc.schema_id
                         LEFT JOIN sys.dm_db_index_usage_stats AS us WITH (NOLOCK) ON si.[object_id] = us.[object_id]
                                                                        AND si.index_id = us.index_id
-                                                                       AND us.database_id = '+ CAST(@DatabaseID AS NVARCHAR(10)) + '
+                                                                       AND us.database_id = ' + CAST(@DatabaseID AS NVARCHAR(10)) + N'
                 WHERE    si.[type] IN ( 0, 1, 2, 3, 4, 5, 6 ) 
                 /* Heaps, clustered, nonclustered, XML, spatial, Cluster Columnstore, NC Columnstore */ ' +
-                CASE WHEN @TableName IS NOT NULL THEN ' and so.name=' + QUOTENAME(@TableName,'''') + ' ' ELSE '' END + 
-        'OPTION    ( RECOMPILE );
+                CASE WHEN @TableName IS NOT NULL THEN N' and so.name=' + QUOTENAME(@TableName,N'''') + N' ' ELSE N'' END + 
+        N'OPTION    ( RECOMPILE );
         ';
         IF @dsql IS NULL 
             RAISERROR('@dsql is null',16,1);
@@ -22642,7 +23372,7 @@ BEGIN TRY
                                 is_disabled, is_hypothetical, is_padded, fill_factor, filter_definition, user_seeks, user_scans, 
                                 user_lookups, user_updates, last_user_seek, last_user_scan, last_user_lookup, last_user_update,
                                 create_date, modify_date )
-                EXEC sp_executesql @dsql;
+                EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
 
 
         RAISERROR (N'Checking partition count',0,1) WITH NOWAIT;
@@ -22661,7 +23391,7 @@ BEGIN TRY
                         VALUES  ( 1, 0 , 
 		                       'Some Checks Were Skipped',
                                '@SkipPartitions Forced to 1',
-                               'http://FirstResponderKit.org', CAST(@Rowcount AS VARCHAR(50)) + ' partitions found. To analyze them, use @BringThePain = 1.', 'We try to keep things quick - and warning, running @BringThePain = 1 can take tens of minutes.', '', ''
+                               'http://FirstResponderKit.org', CAST(@Rowcount AS NVARCHAR(50)) + ' partitions found. To analyze them, use @BringThePain = 1.', 'We try to keep things quick - and warning, running @BringThePain = 1 can take tens of minutes.', '', ''
                                 );
                     END;
             END;
@@ -22813,7 +23543,7 @@ BEGIN TRY
 
         RAISERROR (N'Inserting data into #MissingIndexes',0,1) WITH NOWAIT;
         SET @dsql=N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-                SELECT  id.database_id, id.object_id, ' + QUOTENAME(@DatabaseName,'''') + N', sc.[name], so.[name], id.statement , gs.avg_total_user_cost, 
+                SELECT  id.database_id, id.object_id, @i_DatabaseName, sc.[name], so.[name], id.statement , gs.avg_total_user_cost, 
                         gs.avg_user_impact, gs.user_seeks, gs.user_scans, gs.unique_compiles,id.equality_columns, 
                         id.inequality_columns,id.included_columns
                 FROM    sys.dm_db_missing_index_groups ig
@@ -22834,11 +23564,11 @@ BEGIN TRY
         INSERT    #MissingIndexes ( [database_id], [object_id], [database_name], [schema_name], [table_name], [statement], avg_total_user_cost, 
                                     avg_user_impact, user_seeks, user_scans, unique_compiles, equality_columns, 
                                     inequality_columns, included_columns)
-        EXEC sp_executesql @dsql;
+        EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
 
         SET @dsql = N'
-            SELECT DB_ID(' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], '
-			    + QUOTENAME(@DatabaseName,'''')  + N' AS [database_name],
+            SELECT DB_ID(N' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], 
+			    @i_DatabaseName AS database_name,
 				s.name,
                 fk_object.name AS foreign_key_name,
                 parent_object.[object_id] AS parent_object_id,
@@ -22865,7 +23595,7 @@ BEGIN TRY
                                                 AND fk.[object_id]=fkc.constraint_object_id
                                             ORDER BY fkc.constraint_column_id 
                                     FOR      XML PATH('''') ,
-                                              TYPE).value(''.'', ''varchar(max)''), 1, 1, '''')/*This is how we remove the first comma*/ ) parent ( fk_columns )
+                                              TYPE).value(''.'', ''nvarchar(max)''), 1, 1, '''')/*This is how we remove the first comma*/ ) parent ( fk_columns )
             CROSS APPLY ( SELECT    STUFF( (SELECT    N'', '' + c_referenced.name AS fk_columns
                                             FROM    ' + QUOTENAME(@DatabaseName) + N'.sys.    foreign_key_columns fkc 
                                             JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.columns c_referenced ON fkc.referenced_object_id=c_referenced.[object_id]
@@ -22874,7 +23604,7 @@ BEGIN TRY
                                                 and fk.[object_id]=fkc.constraint_object_id
                                             ORDER BY fkc.constraint_column_id  /*order by col name, we don''t have anything better*/
                                     FOR      XML PATH('''') ,
-                                              TYPE).value(''.'', ''varchar(max)''), 1, 1, '''') ) referenced ( fk_columns )
+                                              TYPE).value(''.'', ''nvarchar(max)''), 1, 1, '''') ) referenced ( fk_columns )
             ' + CASE WHEN @ObjectID IS NOT NULL THEN 
                     'WHERE fk.parent_object_id=' + CAST(@ObjectID AS NVARCHAR(30)) + N' OR fk.referenced_object_id=' + CAST(@ObjectID AS NVARCHAR(30)) + N' ' 
                     ELSE N' ' END + '
@@ -22887,7 +23617,7 @@ BEGIN TRY
         INSERT  #ForeignKeys ( [database_id], [database_name], [schema_name], foreign_key_name, parent_object_id,parent_object_name, referenced_object_id, referenced_object_name,
                                 is_disabled, is_not_trusted, is_not_for_replication, parent_fk_columns, referenced_fk_columns,
                                 [update_referential_action_desc], [delete_referential_action_desc] )
-                EXEC sp_executesql @dsql;
+                EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
 
 
 		IF @SkipStatistics = 0 
@@ -22898,8 +23628,8 @@ BEGIN TRY
 		BEGIN
 		RAISERROR (N'Gathering Statistics Info With Newer Syntax.',0,1) WITH NOWAIT;
 		SET @dsql=N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-					 SELECT DB_ID(' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], '
-					+ QUOTENAME(@DatabaseName,'''')  + N' AS [database_name],
+				SELECT DB_ID(N' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], 
+				    @i_DatabaseName AS database_name,
 					obj.name AS table_name,
 					sch.name AS schema_name,
 			        ISNULL(i.name, ''System Or User Statistic'') AS index_name,
@@ -22940,7 +23670,7 @@ BEGIN TRY
 						  ON       sc.column_id = c.column_id AND sc.object_id = c.object_id
 						  WHERE    sc.stats_id = s.stats_id AND sc.object_id = s.object_id
 						  ORDER BY sc.stats_column_id
-						  FOR   XML PATH(''''), TYPE).value(''.'', ''varchar(max)''), 1, 2, '''') 
+						  FOR   XML PATH(''''), TYPE).value(''.'', ''nvarchar(max)''), 1, 2, '''') 
 						) ca (column_names)
 			WHERE obj.is_ms_shipped = 0
 			OPTION (RECOMPILE);';
@@ -22954,14 +23684,14 @@ BEGIN TRY
 								percent_modifications, modifications_before_auto_update, index_type_desc, table_create_date, table_modify_date,
 								no_recompute, has_filter, filter_definition)
 			
-			EXEC sp_executesql @dsql;
+			EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
 			END;
 			ELSE 
 			BEGIN
 			RAISERROR (N'Gathering Statistics Info With Older Syntax.',0,1) WITH NOWAIT;
 			SET @dsql=N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-						 SELECT DB_ID(' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], '
-								+ QUOTENAME(@DatabaseName,'''')  + N' AS [database_name],
+							SELECT DB_ID(N' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], 
+							    @i_DatabaseName AS database_name,
 								obj.name AS table_name,
 								sch.name AS schema_name,
 						        ISNULL(i.name, ''System Or User Statistic'') AS index_name,
@@ -23004,7 +23734,7 @@ BEGIN TRY
 									  ON       sc.column_id = c.column_id AND sc.object_id = c.object_id
 									  WHERE    sc.stats_id = s.stats_id AND sc.object_id = s.object_id
 									  ORDER BY sc.stats_column_id
-									  FOR   XML PATH(''''), TYPE).value(''.'', ''varchar(max)''), 1, 2, '''') 
+									  FOR   XML PATH(''''), TYPE).value(''.'', ''nvarchar(max)''), 1, 2, '''') 
 									) ca (column_names)
 						WHERE obj.is_ms_shipped = 0
 						AND si.rowcnt > 0
@@ -23019,7 +23749,7 @@ BEGIN TRY
 								percent_modifications, modifications_before_auto_update, index_type_desc, table_create_date, table_modify_date,
 								no_recompute, has_filter, filter_definition)
 			
-			EXEC sp_executesql @dsql;
+			EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
 			END;
 
 			END;
@@ -23027,8 +23757,8 @@ BEGIN TRY
 			IF  (PARSENAME(@SQLServerProductVersion, 4) >= 10)
 			BEGIN
 			RAISERROR (N'Gathering Computed Column Info.',0,1) WITH NOWAIT;
-			SET @dsql=N'SELECT ' + QUOTENAME(@DatabaseName,'''') + N' AS [database_name],
-							   DB_ID(' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], 
+			SET @dsql=N'SELECT DB_ID(@i_DatabaseName) AS [database_id], 
+							   @i_DatabaseName AS database_name,
    					   		   t.name AS table_name,
    					           s.name AS schema_name,
    					           c.name AS column_name,
@@ -23051,13 +23781,12 @@ BEGIN TRY
    					   ON      s.schema_id = t.schema_id
 					   OPTION (RECOMPILE);';
 
-			IF @dsql IS NULL 
-            RAISERROR('@dsql is null',16,1);
+			IF @dsql IS NULL RAISERROR('@dsql is null',16,1);
 
 			INSERT #ComputedColumns
-			        ( [database_name], database_id, table_name, schema_name, column_name, is_nullable, definition, 
+			        ( database_id, [database_name], table_name, schema_name, column_name, is_nullable, definition, 
 					  uses_database_collation, is_persisted, is_computed, is_function, column_definition )			
-			EXEC sp_executesql @dsql;
+			EXEC sp_executesql @dsql, @params = N'@i_DatabaseName NVARCHAR(128)', @i_DatabaseName = @DatabaseName;
 
 			END; 
 			
@@ -23069,7 +23798,7 @@ BEGIN TRY
 			BEGIN
 			RAISERROR (N'Gathering Temporal Table Info',0,1) WITH NOWAIT;
 			SET @dsql=N'SELECT ' + QUOTENAME(@DatabaseName,'''') + N' AS database_name,
-								   DB_ID(' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], 
+								   DB_ID(N' + QUOTENAME(@DatabaseName,'''') + N') AS [database_id], 
 								   s.name AS schema_name,
 								   t.name AS table_name, 
 								   oa.hsn as history_schema_name,
@@ -23157,7 +23886,7 @@ FROM    #IndexSanity si
                                     AND c.is_included_column = 0 /*Just Keys*/
                                     AND c.key_ordinal > 0 /*Ignore non-key columns, such as partitioning keys*/
                             ORDER BY c.object_id, c.index_id, c.key_ordinal    
-                    FOR      XML PATH('') ,TYPE).value('.', 'varchar(max)'), 1, 1, ''))
+                    FOR      XML PATH('') ,TYPE).value('.', 'nvarchar(max)'), 1, 1, ''))
                                 ) D1 ( key_column_names );
 
 RAISERROR (N'Updating #IndexSanity.partition_key_column_name',0,1) WITH NOWAIT;
@@ -23172,7 +23901,7 @@ FROM    #IndexSanity si
                                     AND c.index_id = si.index_id
                                     AND c.partition_ordinal <> 0 /*Just Partitioned Keys*/
                             ORDER BY c.object_id, c.index_id, c.key_ordinal    
-                    FOR      XML PATH('') , TYPE).value('.', 'varchar(max)'), 1, 1,''))) D1 
+                    FOR      XML PATH('') , TYPE).value('.', 'nvarchar(max)'), 1, 1,''))) D1 
                                 ( partition_key_column_name );
 
 RAISERROR (N'Updating #IndexSanity.key_column_names_with_sort_order',0,1) WITH NOWAIT;
@@ -23182,8 +23911,9 @@ FROM    #IndexSanity si
         CROSS APPLY ( SELECT    RTRIM(STUFF( (SELECT    N', ' + c.column_name + CASE c.is_descending_key
                             WHEN 1 THEN N' DESC'
                             ELSE N''
+							END
                         + N' {' + system_type_name + N' ' + CAST(max_length AS NVARCHAR(50)) +  N'}'
-                        END AS col_definition
+                            AS col_definition
                     FROM    #IndexColumns c
                     WHERE    c.database_id= si.database_id
 							AND c.schema_name = si.schema_name
@@ -23192,7 +23922,7 @@ FROM    #IndexSanity si
                             AND c.is_included_column = 0 /*Just Keys*/
                             AND c.key_ordinal > 0 /*Ignore non-key columns, such as partitioning keys*/
                     ORDER BY c.object_id, c.index_id, c.key_ordinal    
-            FOR      XML PATH('') , TYPE).value('.', 'varchar(max)'), 1, 1, ''))
+            FOR      XML PATH('') , TYPE).value('.', 'nvarchar(max)'), 1, 1, ''))
             ) D2 ( key_column_names_with_sort_order );
 
 RAISERROR (N'Updating #IndexSanity.key_column_names_with_sort_order_no_types (for create tsql)',0,1) WITH NOWAIT;
@@ -23211,7 +23941,7 @@ FROM    #IndexSanity si
                             AND c.is_included_column = 0 /*Just Keys*/
                             AND c.key_ordinal > 0 /*Ignore non-key columns, such as partitioning keys*/
                     ORDER BY c.object_id, c.index_id, c.key_ordinal    
-            FOR      XML PATH('') , TYPE).value('.', 'varchar(max)'), 1, 1, ''))
+            FOR      XML PATH('') , TYPE).value('.', 'nvarchar(max)'), 1, 1, ''))
             ) D2 ( key_column_names_with_sort_order_no_types );
 
 RAISERROR (N'Updating #IndexSanity.include_column_names',0,1) WITH NOWAIT;
@@ -23228,7 +23958,7 @@ FROM    #IndexSanity si
                                 AND c.is_included_column = 1 /*Just includes*/
                         ORDER BY c.column_name /*Order doesn't matter in includes, 
                                 this is here to make rows easy to compare.*/ 
-                FOR      XML PATH('') ,  TYPE).value('.', 'varchar(max)'), 1, 1, ''))
+                FOR      XML PATH('') ,  TYPE).value('.', 'nvarchar(max)'), 1, 1, ''))
                 ) D3 ( include_column_names );
 
 RAISERROR (N'Updating #IndexSanity.include_column_names_no_types (for create tsql)',0,1) WITH NOWAIT;
@@ -23244,7 +23974,7 @@ FROM    #IndexSanity si
                                 AND c.is_included_column = 1 /*Just includes*/
                         ORDER BY c.column_name /*Order doesn't matter in includes, 
                                 this is here to make rows easy to compare.*/ 
-                FOR      XML PATH('') ,  TYPE).value('.', 'varchar(max)'), 1, 1, ''))
+                FOR      XML PATH('') ,  TYPE).value('.', 'nvarchar(max)'), 1, 1, ''))
                 ) D3 ( include_column_names_no_types );
 
 RAISERROR (N'Updating #IndexSanity.count_key_columns and count_include_columns',0,1) WITH NOWAIT;
@@ -23317,7 +24047,7 @@ INSERT    #IndexSanitySize ( [index_sanity_id], [database_id], [schema_name], pa
                 AND ipp.database_id = ipp2.database_id
 				AND ipp.schema_name = ipp2.schema_name
             ORDER BY ipp2.partition_number
-            FOR      XML PATH(''),TYPE).value('.', 'varchar(max)'), 1, 1, '')) 
+            FOR      XML PATH(''),TYPE).value('.', 'nvarchar(max)'), 1, 1, '')) 
                 data_compression_info(data_compression_rollup)
         GROUP BY index_sanity_id, ipp.database_id, ipp.schema_name
         ORDER BY index_sanity_id 
@@ -23343,7 +24073,7 @@ RAISERROR (N'Update index_secret on #IndexSanity for NC indexes.',0,1) WITH NOWA
 UPDATE nc 
 SET secret_columns=
     N'[' + 
-    CASE tb.count_key_columns WHEN 0 THEN '1' ELSE CAST(tb.count_key_columns AS VARCHAR(10)) END +
+    CASE tb.count_key_columns WHEN 0 THEN '1' ELSE CAST(tb.count_key_columns AS NVARCHAR(10)) END +
     CASE nc.is_unique WHEN 1 THEN N' INCLUDE' ELSE N' KEY' END +
     CASE WHEN tb.count_key_columns > 1 THEN  N'S] ' ELSE N'] ' END +
     CASE tb.index_id WHEN 0 THEN '[RID]' ELSE LTRIM(tb.key_column_names) +
@@ -23446,23 +24176,23 @@ RAISERROR (N'Populate #PartitionCompressionInfo.',0,1) WITH NOWAIT;
 			GROUP BY [maps].[rN], index_sanity_id, maps.data_compression_desc)
 INSERT #PartitionCompressionInfo
 		(index_sanity_id, partition_compression_detail)
-SELECT DISTINCT grps.index_sanity_id , SUBSTRING((  STUFF((SELECT ', ' + ' Partition'
+SELECT DISTINCT grps.index_sanity_id , SUBSTRING((  STUFF((SELECT N', ' + N' Partition'
 											+ CASE WHEN [grps2].[MinKey] < [grps2].[MaxKey]
-													THEN +'s '
-														+ CAST([grps2].[MinKey] AS VARCHAR)
-														+ ' - '
-														+ CAST([grps2].[MaxKey] AS VARCHAR)
-														+ ' use ' + grps2.data_compression_desc
-													ELSE ' '
-														+ CAST([grps2].[MinKey] AS VARCHAR)
-														+ ' uses '  + grps2.data_compression_desc
+													THEN + N's '
+														+ CAST([grps2].[MinKey] AS NVARCHAR(10))
+														+ N' - '
+														+ CAST([grps2].[MaxKey] AS NVARCHAR(10))
+														+ N' use ' + grps2.data_compression_desc
+													ELSE N' '
+														+ CAST([grps2].[MinKey] AS NVARCHAR(10))
+														+ N' uses '  + grps2.data_compression_desc
 												END AS [Partitions]
 										FROM   [grps] AS grps2
 										WHERE grps2.index_sanity_id = grps.index_sanity_id
 										ORDER BY grps2.MinKey, grps2.MaxKey
 							FOR     XML PATH('') ,
 										TYPE 
-					).[value]('.', 'VARCHAR(MAX)'), 1, 1, '') ), 0, 8000) AS [partition_compression_detail]
+					).[value]('.', 'NVARCHAR(MAX)'), 1, 1, '') ), 0, 8000) AS [partition_compression_detail]
 FROM grps;
 		
 RAISERROR (N'Update #PartitionCompressionInfo.',0,1) WITH NOWAIT;
@@ -23471,7 +24201,6 @@ SET sz.data_compression_desc = pci.partition_compression_detail
 FROM #IndexSanitySize sz
 JOIN #PartitionCompressionInfo AS pci
 ON pci.index_sanity_id = sz.index_sanity_id;
-
 
 
 /*This is for debugging*/ 
@@ -23774,7 +24503,20 @@ BEGIN;
                 SELECT  11 AS check_id, 
                         i.index_sanity_id,
                         10 AS Priority,
-                        N'Aggressive Indexes' AS findings_group,
+                        N'Aggressive ' 
+                            + CASE COALESCE((SELECT SUM(1) FROM #IndexSanity iMe INNER JOIN #IndexSanity iOthers ON iMe.database_id = iOthers.database_id AND iMe.object_id = iOthers.object_id AND iOthers.index_id > 1 WHERE i.index_sanity_id = iMe.index_sanity_id),0)
+                                WHEN 0 THEN N'Under-Indexing'
+                                WHEN 1 THEN N'Under-Indexing'
+                                WHEN 2 THEN N'Under-Indexing'
+                                WHEN 3 THEN N'Under-Indexing'
+                                WHEN 4 THEN N'Indexes'
+                                WHEN 5 THEN N'Indexes'
+                                WHEN 6 THEN N'Indexes'
+                                WHEN 7 THEN N'Indexes'
+                                WHEN 8 THEN N'Indexes'
+                                WHEN 9 THEN N'Indexes'
+                                ELSE N'Over-Indexing'
+                                END AS findings_group,
                         N'Total lock wait time > 5 minutes (row + page) with long average waits' AS finding, 
                         [database_name] AS [Database Name],
                         N'http://BrentOzar.com/go/AggressiveIndexes' AS URL,
@@ -23791,6 +24533,7 @@ BEGIN;
                 WHERE    (total_row_lock_wait_in_ms + total_page_lock_wait_in_ms) > 300000
 				AND (sz.avg_page_lock_wait_in_ms + sz.avg_row_lock_wait_in_ms) > 5000
 				GROUP BY i.index_sanity_id, [database_name], i.db_schema_object_indexid, sz.index_lock_wait_summary, i.index_definition, i.secret_columns, i.index_usage_summary, sz.index_size_summary, sz.index_sanity_id
+                ORDER BY 4, [database_name], 8
                 OPTION    ( RECOMPILE );
 
         RAISERROR(N'check_id 12: Total lock wait time > 5 minutes (row + page) with short average waits', 0,1) WITH NOWAIT;
@@ -23799,7 +24542,20 @@ BEGIN;
                 SELECT  12 AS check_id, 
                         i.index_sanity_id,
                         10 AS Priority,
-                        N'Aggressive Indexes' AS findings_group,
+                        N'Aggressive ' 
+                            + CASE COALESCE((SELECT SUM(1) FROM #IndexSanity iMe INNER JOIN #IndexSanity iOthers ON iMe.database_id = iOthers.database_id AND iMe.object_id = iOthers.object_id AND iOthers.index_id > 1 WHERE i.index_sanity_id = iMe.index_sanity_id),0)
+                                WHEN 0 THEN N'Under-Indexing'
+                                WHEN 1 THEN N'Under-Indexing'
+                                WHEN 2 THEN N'Under-Indexing'
+                                WHEN 3 THEN N'Under-Indexing'
+                                WHEN 4 THEN N'Indexes'
+                                WHEN 5 THEN N'Indexes'
+                                WHEN 6 THEN N'Indexes'
+                                WHEN 7 THEN N'Indexes'
+                                WHEN 8 THEN N'Indexes'
+                                WHEN 9 THEN N'Indexes'
+                                ELSE N'Over-Indexing'
+                                END AS findings_group,
                         N'Total lock wait time > 5 minutes (row + page) with short average waits' AS finding, 
                         [database_name] AS [Database Name],
                         N'http://BrentOzar.com/go/AggressiveIndexes' AS URL,
@@ -23816,6 +24572,7 @@ BEGIN;
                 WHERE    (total_row_lock_wait_in_ms + total_page_lock_wait_in_ms) > 300000
 				AND (sz.avg_page_lock_wait_in_ms + sz.avg_row_lock_wait_in_ms) < 5000
 				GROUP BY i.index_sanity_id, [database_name], i.db_schema_object_indexid, sz.index_lock_wait_summary, i.index_definition, i.secret_columns, i.index_usage_summary, sz.index_size_summary, sz.index_sanity_id
+                ORDER BY 4, [database_name], 8
                 OPTION    ( RECOMPILE );
 
         END;
@@ -24430,8 +25187,8 @@ BEGIN;
                                 N'Heaps with forwarded records or deletes' AS finding, 
                                 [database_name] AS [Database Name],
                                 N'http://BrentOzar.com/go/SelfLoathing' AS URL,
-                                CAST(h.forwarded_fetch_count AS NVARCHAR(256)) + ' forwarded fetches, '
-                                + CAST(h.leaf_delete_count AS NVARCHAR(256)) + ' deletes against heap:'
+                                CAST(h.forwarded_fetch_count AS NVARCHAR(256)) + N' forwarded fetches, '
+                                + CAST(h.leaf_delete_count AS NVARCHAR(256)) + N' deletes against heap:'
                                 + db_schema_object_indexid AS details, 
                                 i.index_definition, 
                                 i.secret_columns,
@@ -25682,7 +26439,7 @@ BEGIN;
 											[avg_page_lock_wait_in_ms] BIGINT, 
 											[total_index_lock_promotion_attempt_count] BIGINT, 
 											[total_index_lock_promotion_count] BIGINT, 
-											[data_compression_desc] VARCHAR(8000), 
+											[data_compression_desc] NVARCHAR(4000), 
 											[create_date] DATETIME, 
 											[modify_date] DATETIME, 
 											[more_info] NVARCHAR(500),
@@ -25795,7 +26552,7 @@ BEGIN;
 										i.[schema_name] AS [Schema Name], 
 										i.[object_name] AS [Object Name], 
 										ISNULL(i.index_name, '''') AS [Index Name], 
-										CAST(i.index_id AS VARCHAR(10))AS [Index ID],
+										CAST(i.index_id AS NVARCHAR(10))AS [Index ID],
 										db_schema_object_indexid AS [Details: schema.table.index(indexid)], 
 										CASE    WHEN index_id IN ( 1, 0 ) THEN ''TABLE''
 											ELSE ''NonClustered''
@@ -25876,7 +26633,7 @@ BEGIN;
                 i.[schema_name] AS [Schema Name], 
                 i.[object_name] AS [Object Name], 
                 ISNULL(i.index_name, '') AS [Index Name], 
-                CAST(i.index_id AS VARCHAR(10))AS [Index ID],
+                CAST(i.index_id AS NVARCHAR(10))AS [Index ID],
                 db_schema_object_indexid AS [Details: schema.table.index(indexid)], 
                 CASE    WHEN index_id IN ( 1, 0 ) THEN 'TABLE'
                     ELSE 'NonClustered'
@@ -26036,8 +26793,8 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE @Version VARCHAR(30);
-SET @Version = '1.3';
-SET @VersionDate = '20180301';
+SET @Version = '1.5';
+SET @VersionDate = '20180501';
 
 
 	IF @Help = 1 PRINT '
@@ -26075,6 +26832,17 @@ SET @VersionDate = '20180301';
 	To learn more, visit http://FirstResponderKit.org where you can download new
 	versions for free, watch training videos on how it works, get more info on
 	the findings, contribute your own code, and more.
+
+	Known limitations of this version:
+	 - Only 2012+ is supported (2008 and 2008R2 are kaput in 2019, so I''m not putting time into them)
+	 - If your tables have weird characters in them (https://en.wikipedia.org/wiki/List_of_XML_and_HTML_character_entity_references) you may get errors trying to parse the XML.
+	   I took a long look at this one, and:
+		1) Trying to account for all the weird places these could crop up is a losing effort. 
+		2) Replace is slow af on lots of XML.
+	- Your mom.
+
+
+
 
 	Unknown limitations of this version:
 	 - None.  (If we knew them, they would be known. Duh.)
@@ -26188,6 +26956,7 @@ SET @VersionDate = '20180301';
 					dd.deadlock_xml.value('(//deadlock/victim-list/victimProcess/@id)[1]', 'NVARCHAR(256)') AS victim_id,
 					ca.dp.value('@id', 'NVARCHAR(256)') AS id,
                     ca.dp.value('@currentdb', 'BIGINT') AS database_id,
+                    ca.dp.value('@priority', 'SMALLINT') AS priority,
                     ca.dp.value('@logused', 'BIGINT') AS log_used,
                     ca.dp.value('@waitresource', 'NVARCHAR(256)') AS wait_resource,
                     ca.dp.value('@waittime', 'BIGINT') AS wait_time,
@@ -26202,7 +26971,8 @@ SET @VersionDate = '20180301';
                     ca.dp.value('@loginname', 'NVARCHAR(256)') AS login_name,
                     ca.dp.value('@isolationlevel', 'NVARCHAR(256)') AS isolation_level,
                     ca2.ib.query('.') AS input_buffer,
-                    ca.dp.query('.') AS process_xml
+                    ca.dp.query('.') AS process_xml,
+                    dd.deadlock_xml.query('/event/data/value/deadlock') AS deadlock_graph
         INTO        #deadlock_process
         FROM        #deadlock_data AS dd
         CROSS APPLY dd.deadlock_xml.nodes('//deadlock/process-list/process') AS ca(dp)
@@ -26243,6 +27013,7 @@ SET @VersionDate = '20180301';
 					ca.dr.value('@dbid', 'BIGINT') AS database_id,
                     ca.dr.value('@objectname', 'NVARCHAR(1000)') AS object_name,
                     ca.dr.value('@mode', 'NVARCHAR(256)') AS lock_mode,
+					ca.dr.value('@indexname', 'NVARCHAR(256)') AS index_name,
                     w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
                     w.l.value('@mode', 'NVARCHAR(256)') AS waiter_mode,
                     o.l.value('@id', 'NVARCHAR(256)') AS owner_id,
@@ -26263,6 +27034,7 @@ SET @VersionDate = '20180301';
 					ca.dr.value('@dbid', 'BIGINT') AS database_id,
                     ca.dr.value('@objectname', 'NVARCHAR(256)') AS object_name,
                     ca.dr.value('@mode', 'NVARCHAR(256)') AS lock_mode,
+					ca.dr.value('@indexname', 'NVARCHAR(256)') AS index_name,
                     w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
                     w.l.value('@mode', 'NVARCHAR(256)') AS waiter_mode,
                     o.l.value('@id', 'NVARCHAR(256)') AS owner_id,
@@ -26280,6 +27052,7 @@ SET @VersionDate = '20180301';
 					ca.dr.value('@dbid', 'BIGINT') AS database_id,
                     ca.dr.value('@objectname', 'NVARCHAR(256)') AS object_name,
                     ca.dr.value('@mode', 'NVARCHAR(256)') AS lock_mode,
+					ca.dr.value('@indexname', 'NVARCHAR(256)') AS index_name,
                     w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
                     w.l.value('@mode', 'NVARCHAR(256)') AS waiter_mode,
                     o.l.value('@id', 'NVARCHAR(256)') AS owner_id,
@@ -26297,6 +27070,7 @@ SET @VersionDate = '20180301';
 					ca.dr.value('@dbid', 'BIGINT') AS database_id,
                     ca.dr.value('@objectname', 'NVARCHAR(256)') AS object_name,
                     ca.dr.value('@mode', 'NVARCHAR(256)') AS lock_mode,
+					ca.dr.value('@indexname', 'NVARCHAR(256)') AS index_name,
                     w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
                     w.l.value('@mode', 'NVARCHAR(256)') AS waiter_mode,
                     o.l.value('@id', 'NVARCHAR(256)') AS owner_id,
@@ -26307,12 +27081,39 @@ SET @VersionDate = '20180301';
         CROSS APPLY ca.dr.nodes('//owner-list/owner') AS o(l)
 		OPTION ( RECOMPILE );
 
-		/*Parse parallel deadlocks*/
+
+		/*This parses row group locks*/
+        INSERT #deadlock_owner_waiter
         SELECT      dr.event_date,
+					ca.dr.value('@dbid', 'BIGINT') AS database_id,
+                    ca.dr.value('@objectname', 'NVARCHAR(256)') AS object_name,
+                    ca.dr.value('@mode', 'NVARCHAR(256)') AS lock_mode,
+					ca.dr.value('@indexname', 'NVARCHAR(256)') AS index_name,
+                    w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
+                    w.l.value('@mode', 'NVARCHAR(256)') AS waiter_mode,
+                    o.l.value('@id', 'NVARCHAR(256)') AS owner_id,
+                    o.l.value('@mode', 'NVARCHAR(256)') AS owner_mode
+        FROM        #deadlock_resource AS dr
+        CROSS APPLY dr.resource_xml.nodes('//resource-list/rowgrouplock') AS ca(dr)
+        CROSS APPLY ca.dr.nodes('//waiter-list/waiter') AS w(l)
+        CROSS APPLY ca.dr.nodes('//owner-list/owner') AS o(l)
+		OPTION ( RECOMPILE );
+
+
+		/*Parse parallel deadlocks*/
+        SELECT		dr.event_date,
 					ca.dr.value('@id', 'NVARCHAR(256)') AS id,
                     ca.dr.value('@WaitType', 'NVARCHAR(256)') AS wait_type,
                     ca.dr.value('@nodeId', 'BIGINT') AS node_id,
-                    w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
+					/* These columns are in 2017 CU5 ONLY */
+					ca.dr.value('@waiterType', 'NVARCHAR(256)') AS waiter_type,
+					ca.dr.value('@ownerActivity', 'NVARCHAR(256)') AS owner_activity,
+					ca.dr.value('@waiterActivity', 'NVARCHAR(256)') AS waiter_activity,
+					ca.dr.value('@merging', 'NVARCHAR(256)') AS merging,
+					ca.dr.value('@spilling', 'NVARCHAR(256)') AS spilling,
+					ca.dr.value('@waitingToClose', 'NVARCHAR(256)') AS waiting_to_close,
+                    /*                                    */
+					w.l.value('@id', 'NVARCHAR(256)') AS waiter_id,
                     o.l.value('@id', 'NVARCHAR(256)') AS owner_id
         INTO #deadlock_resource_parallel
 		FROM        #deadlock_resource AS dr
@@ -26320,6 +27121,18 @@ SET @VersionDate = '20180301';
         CROSS APPLY ca.dr.nodes('//waiter-list/waiter') AS w(l)
         CROSS APPLY ca.dr.nodes('//owner-list/owner') AS o(l)
 		OPTION ( RECOMPILE );
+
+		/*Get rid of parallel noise*/
+		WITH c
+		    AS
+		     (
+		         SELECT *, ROW_NUMBER() OVER ( PARTITION BY drp.owner_id, drp.waiter_id ORDER BY drp.event_date ) AS rn
+		         FROM   #deadlock_resource_parallel AS drp
+		     )
+		DELETE FROM c
+		WHERE c.rn > 1;
+
+
 
 		/*Get rid of nonsense*/
 		DELETE dow
@@ -26379,11 +27192,11 @@ SET @VersionDate = '20180301';
 
 		INSERT #deadlock_findings ( check_id, database_name, object_name, finding_group, finding ) 	
 		SELECT 2 AS check_id, 
-			   DB_NAME(dow.database_id) AS database_name, 
-			   dow.object_name AS object_name,
+			   ISNULL(DB_NAME(dow.database_id), 'UNKNOWN') AS database_name, 
+			   ISNULL(dow.object_name, 'UNKNOWN') AS object_name,
 			   'Total object deadlocks' AS finding_group,
 			   'This object was involved in ' 
-				+ CONVERT(NVARCHAR(20), COUNT_BIG(DISTINCT dow.object_name))
+				+ CONVERT(NVARCHAR(20), COUNT_BIG(DISTINCT dow.event_date))
 				+ ' deadlock(s).'
         FROM   #deadlock_owner_waiter AS dow
 		WHERE 1 = 1
@@ -26393,6 +27206,27 @@ SET @VersionDate = '20180301';
 		AND (dow.object_name = @ObjectName OR @ObjectName IS NULL)
 		GROUP BY DB_NAME(dow.database_id), dow.object_name
 		OPTION ( RECOMPILE );
+
+		/*Check 2 continuation, number of locks per index*/
+
+		INSERT #deadlock_findings ( check_id, database_name, object_name, finding_group, finding ) 	
+		SELECT 2 AS check_id, 
+			   ISNULL(DB_NAME(dow.database_id), 'UNKNOWN') AS database_name, 
+			   dow.index_name AS index_name,
+			   'Total index deadlocks' AS finding_group,
+			   'This index was involved in ' 
+				+ CONVERT(NVARCHAR(20), COUNT_BIG(DISTINCT dow.event_date))
+				+ ' deadlock(s).'
+        FROM   #deadlock_owner_waiter AS dow
+		WHERE 1 = 1
+		AND (DB_NAME(dow.database_id) = @DatabaseName OR @DatabaseName IS NULL)
+		AND (dow.event_date >= @StartDate OR @StartDate IS NULL)
+		AND (dow.event_date < @EndDate OR @EndDate IS NULL)
+		AND (dow.object_name = @ObjectName OR @ObjectName IS NULL)
+		AND dow.index_name IS NOT NULL
+		GROUP BY DB_NAME(dow.database_id), dow.index_name
+		OPTION ( RECOMPILE );
+
 		
 
 		/*Check 3 looks for Serializable locking*/
@@ -26484,6 +27318,7 @@ SET @VersionDate = '20180301';
 				AND (dp.host_name = @HostName OR @HostName IS NULL)
 				AND (dp.login_name = @LoginName OR @LoginName IS NULL)
 				AND (dow.object_name = @ObjectName OR @ObjectName IS NULL)
+				AND dow.object_name IS NOT NULL
 				GROUP BY DB_NAME(dp.database_id), SUBSTRING(dp.wait_resource, 1, CHARINDEX(':', dp.wait_resource) - 1), dow.object_name
 							)	
 		INSERT #deadlock_findings ( check_id, database_name, object_name, finding_group, finding ) 
@@ -26526,7 +27361,7 @@ SET @VersionDate = '20180301';
 					)
 		INSERT #deadlock_findings ( check_id, database_name, object_name, finding_group, finding ) 
 		SELECT DISTINCT 7 AS check_id,
-			   DB_NAME(dow.database_id) AS database_name,
+			   ISNULL(DB_NAME(dow.database_id), 'UNKNOWN') AS database_name,
 			   ds.proc_name AS object_name,
 			   'More Info - Query' AS finding_group,
 			   'EXEC sp_BlitzCache ' +
@@ -26628,6 +27463,7 @@ SET @VersionDate = '20180301';
 				AND (dow.event_date >= @StartDate OR @StartDate IS NULL)
 				AND (dow.event_date < @EndDate OR @EndDate IS NULL)
 				AND (dow.object_name = @ObjectName OR @ObjectName IS NULL)
+				AND dow.object_name IS NOT NULL
 					)
 		INSERT #deadlock_findings ( check_id, database_name, object_name, finding_group, finding ) 
 		SELECT 9 AS check_id,	
@@ -26722,6 +27558,7 @@ SET @VersionDate = '20180301';
 		            dp.id,
 					dp.victim_id,
 		            dp.database_id,
+		            dp.priority,
 		            dp.log_used,
 		            dp.wait_resource,
 		            CONVERT(
@@ -26753,7 +27590,20 @@ SET @VersionDate = '20180301';
 					ROW_NUMBER() OVER ( PARTITION BY dp.event_date ORDER BY dp.event_date ) -1 AS qn,
 					dp.is_victim,
 					ISNULL(dp.owner_mode, '-') AS owner_mode,
-					ISNULL(dp.waiter_mode, '-') AS waiter_mode
+					NULL AS owner_waiter_type,
+					NULL AS owner_activity,
+					NULL AS owner_waiter_activity,
+					NULL AS owner_merging,
+					NULL AS owner_spilling,
+					NULL AS owner_waiting_to_close,
+					ISNULL(dp.waiter_mode, '-') AS waiter_mode,
+					NULL AS waiter_waiter_type,
+					NULL AS waiter_owner_activity,
+					NULL AS waiter_waiter_activity,
+					NULL AS waiter_merging,
+					NULL AS waiter_spilling,
+					NULL AS waiter_waiting_to_close,
+					dp.deadlock_graph
 		     FROM   #deadlock_process AS dp 
 			 WHERE dp.victim_id IS NOT NULL
 			 
@@ -26764,6 +27614,7 @@ SET @VersionDate = '20180301';
 		            dp.id,
 					dp.victim_id,
 		            dp.database_id,
+		            dp.priority,
 		            dp.log_used,
 		            dp.wait_resource,
 		            CONVERT(XML, N'parallel_deadlock') AS object_names,
@@ -26784,7 +27635,20 @@ SET @VersionDate = '20180301';
 					ROW_NUMBER() OVER ( PARTITION BY dp.event_date ORDER BY dp.event_date ) -1 AS qn,
 					NULL AS is_victim,
 					cao.wait_type AS owner_mode,
-					caw.wait_type AS waiter_mode
+					cao.waiter_type AS owner_waiter_type,
+					cao.owner_activity AS owner_activity,
+					cao.waiter_activity	AS owner_waiter_activity,
+					cao.merging	AS owner_merging,
+					cao.spilling AS owner_spilling,
+					cao.waiting_to_close AS owner_waiting_to_close,
+					caw.wait_type AS waiter_mode,
+					caw.waiter_type AS waiter_waiter_type,
+					caw.owner_activity AS waiter_owner_activity,
+					caw.waiter_activity	AS waiter_waiter_activity,
+					caw.merging	AS waiter_merging,
+					caw.spilling AS waiter_spilling,
+					caw.waiting_to_close AS waiter_waiting_to_close,
+					dp.deadlock_graph
 		     FROM   #deadlock_process AS dp 
 			 CROSS APPLY (SELECT TOP 1 * FROM  #deadlock_resource_parallel AS drp WHERE drp.owner_id = dp.id AND drp.wait_type = 'e_waitPipeNewRow' ORDER BY drp.event_date) AS cao
 			 CROSS APPLY (SELECT TOP 1 * FROM  #deadlock_resource_parallel AS drp WHERE drp.owner_id = dp.id AND drp.wait_type = 'e_waitPipeGetRow' ORDER BY drp.event_date) AS caw
@@ -26809,13 +27673,31 @@ SET @VersionDate = '20180301';
 		       d.host_name,
 		       d.client_app,
 		       d.wait_time,
+		       d.priority,
 			   d.log_used,
 		       d.last_tran_started,
 		       d.last_batch_started,
 		       d.last_batch_completed,
-		       d.transaction_name
+		       d.transaction_name,
+			   /*These columns will be NULL for regular (non-parallel) deadlocks*/
+			   d.owner_mode,
+			   d.owner_waiter_type,
+			   d.owner_activity,
+			   d.owner_waiter_activity,
+			   d.owner_merging,
+			   d.owner_spilling,
+			   d.owner_waiting_to_close,
+			   d.waiter_mode,
+			   d.waiter_waiter_type,
+			   d.waiter_owner_activity,
+			   d.waiter_waiter_activity,
+			   d.waiter_merging,
+			   d.waiter_spilling,
+			   d.waiter_waiting_to_close,
+			   d.deadlock_graph
 		FROM   deadlocks AS d
 		WHERE  d.dn = 1
+		AND en < CASE WHEN d.deadlock_type = N'Parallel Deadlock' THEN 2 ELSE 2147483647 END 
 		AND (DB_NAME(d.database_id) = @DatabaseName OR @DatabaseName IS NULL)
 		AND (d.event_date >= @StartDate OR @StartDate IS NULL)
 		AND (d.event_date < @EndDate OR @EndDate IS NULL)
@@ -26914,6 +27796,7 @@ ALTER PROCEDURE dbo.sp_BlitzQueryStore
     @HideSummary BIT = 0 ,
 	@SkipXML BIT = 0,
 	@Debug BIT = 0,
+	@ExpertMode BIT = 0,
 	@VersionDate DATETIME = NULL OUTPUT
 WITH RECOMPILE
 AS
@@ -26923,8 +27806,8 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE @Version NVARCHAR(30);
-	SET @Version = '2.3';
-	SET @VersionDate = '20180301';
+	SET @Version = '2.5';
+	SET @VersionDate = '20180501';
 
 DECLARE /*Variables for the variable Gods*/
 		@msg NVARCHAR(MAX) = N'', --Used to format RAISERROR messages in some places
@@ -27410,6 +28293,7 @@ CREATE TABLE #working_warnings
     is_cursor BIT,
 	is_optimistic_cursor BIT,
 	is_forward_only_cursor BIT,
+	is_fast_forward_cursor BIT,	
 	is_cursor_dynamic BIT,
     is_parallel BIT,
 	is_forced_serial BIT,
@@ -27486,6 +28370,8 @@ CREATE TABLE #working_warnings
 	is_mstvf BIT,
 	is_mm_join BIT,
     is_nonsargable BIT,
+	busy_loops BIT,
+	tvf_join BIT,
 	implicit_conversion_info XML,
 	cached_execution_parameters XML,
 	missing_indexes XML,
@@ -27651,12 +28537,13 @@ CREATE TABLE #stored_proc_info
 	converted_column_name NVARCHAR(258),
     compile_time_value NVARCHAR(258),
     proc_name NVARCHAR(1000),
-    column_name NVARCHAR(258),
-    converted_to NVARCHAR(258)
+    column_name NVARCHAR(4000),
+    converted_to NVARCHAR(258),
+	set_options NVARCHAR(1000)
 	INDEX tf_ix_ids CLUSTERED (sql_handle, query_hash)
 );
 
-DROP TABLE IF EXISTS #variable_info
+DROP TABLE IF EXISTS #variable_info;
 
 CREATE TABLE #variable_info
 (
@@ -27669,7 +28556,7 @@ CREATE TABLE #variable_info
 	INDEX vif_ix_ids CLUSTERED (sql_handle, query_hash)
 );
 
-DROP TABLE IF EXISTS #conversion_info
+DROP TABLE IF EXISTS #conversion_info;
 
 CREATE TABLE #conversion_info
 (
@@ -27693,7 +28580,7 @@ CREATE TABLE #conversion_info
 /* These tables support the Missing Index details clickable*/
 
 
-DROP TABLE IF EXISTS #missing_index_xml
+DROP TABLE IF EXISTS #missing_index_xml;
 
 CREATE TABLE #missing_index_xml
 (
@@ -27703,7 +28590,7 @@ CREATE TABLE #missing_index_xml
     index_xml XML
 );
 
-DROP TABLE IF EXISTS #missing_index_schema
+DROP TABLE IF EXISTS #missing_index_schema;
 
 CREATE TABLE #missing_index_schema
 (
@@ -27717,7 +28604,7 @@ CREATE TABLE #missing_index_schema
 );
 
 
-DROP TABLE IF EXISTS #missing_index_usage
+DROP TABLE IF EXISTS #missing_index_usage;
 
 CREATE TABLE #missing_index_usage
 (
@@ -27731,7 +28618,7 @@ CREATE TABLE #missing_index_usage
     index_xml XML
 );
 
-DROP TABLE IF EXISTS #missing_index_detail
+DROP TABLE IF EXISTS #missing_index_detail;
 
 CREATE TABLE #missing_index_detail
 (
@@ -27746,7 +28633,7 @@ CREATE TABLE #missing_index_detail
 );
 
 
-DROP TABLE IF EXISTS #missing_index_pretty
+DROP TABLE IF EXISTS #missing_index_pretty;
 
 CREATE TABLE #missing_index_pretty
 (
@@ -27795,8 +28682,8 @@ CREATE TABLE #missing_index_pretty
 			   + N')' 
 			   + CHAR(10)
 			   + CASE WHEN include IS NOT NULL
-					  THEN N'INCLUDE (' + include + N')'
-					  ELSE N''
+					  THEN N'INCLUDE (' + include + N') WITH (FILLFACTOR=100, ONLINE=?, SORT_IN_TEMPDB=?, DATA_COMPRESSION=?);'
+					  ELSE N' WITH (FILLFACTOR=100, ONLINE=?, SORT_IN_TEMPDB=?, DATA_COMPRESSION=?);'
 				 END
 			   + CHAR(10)
 			   + N'GO'
@@ -27900,8 +28787,6 @@ IF (@QueryIdFilter IS NOT NULL)
 					    '; 
 	END; 
 
-
-
 IF @Debug = 1
 	RAISERROR(N'Starting WHERE clause:', 0, 1) WITH NOWAIT;
 	PRINT @sql_where;
@@ -27917,7 +28802,6 @@ IF (@ExportToExcel = 1 OR @SkipXML = 1)
 	RAISERROR(N'Exporting to Excel or skipping XML, hiding summary', 0, 1) WITH NOWAIT;
 	SET @HideSummary = 1;
 	END;
-
 
 IF @StoredProcName IS NOT NULL
 	BEGIN 
@@ -27994,21 +28878,21 @@ SELECT   CONVERT(DATE, qsrs.last_execution_time) AS flat_date,
          SUM((qsrs.avg_logical_io_writes* 8 ) / 1024.) / SUM(qsrs.count_executions) AS total_avg_logical_io_writes_mb,
          SUM(( qsrs.avg_query_max_used_memory * 8 ) / 1024.) / SUM(qsrs.count_executions) AS total_avg_query_max_used_memory_mb,
          SUM(qsrs.avg_rowcount) AS total_rowcount,
-         SUM(qsrs.count_executions) AS total_count_executions'
+         SUM(qsrs.count_executions) AS total_count_executions';
 		 IF @new_columns = 1
 			BEGIN
 				SET @sql_select += N',
 									 SUM((qsrs.avg_log_bytes_used) / 1048576.) / SUM(qsrs.count_executions) AS total_avg_log_bytes_mb,
 									 SUM(avg_tempdb_space_used) /  SUM(qsrs.count_executions) AS total_avg_tempdb_space 
-									 '
-			END
+									 ';
+			END;
 		IF @new_columns = 0
 			BEGIN
 				SET @sql_select += N',
 									NULL AS total_avg_log_bytes_mb, 
 									NULL AS total_avg_tempdb_space
-									'
-			END
+									';
+			END;
 
 
 SET @sql_select += N'FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_runtime_stats AS qsrs
@@ -28718,7 +29602,8 @@ EXEC sys.sp_executesql  @stmt = @sql_select,
 /*This just helps us classify our queries*/
 UPDATE #working_metrics
 SET proc_or_function_name = N'Statement'
-WHERE proc_or_function_name IS NULL;
+WHERE proc_or_function_name IS NULL
+OPTION(RECOMPILE);
 
 
 /*
@@ -28935,7 +29820,8 @@ SET top_three_waits = CASE
 						WHEN @waitstats = 0 THEN N'The query store waits stats DMV is not available'
 						ELSE N'No Significant waits detected!'
 						END
-WHERE top_three_waits IS NULL;
+WHERE top_three_waits IS NULL
+OPTION(RECOMPILE);
 
 END;
 END TRY
@@ -29275,7 +30161,8 @@ ON  s.query_hash = b.query_hash
 WHERE s.statement.exist('/p:StmtSimple/@StatementOptmEarlyAbortReason[.="MemoryLimitExceeded"]') = 1
 OPTION (RECOMPILE);
 
-
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Performing index DML checks', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 index_dml AS (
@@ -29310,6 +30197,8 @@ table_dml AS (
 	ON t.query_hash = b.query_hash
 	WHERE t.table_dml = 1
 OPTION (RECOMPILE);
+END;
+
 
 RAISERROR(N'Gathering trivial plans', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
@@ -29328,6 +30217,8 @@ WHERE   s.statement.exist('//p:StmtSimple[@StatementOptmLevel[.="TRIVIAL"]]/p:Qu
 ON b.sql_handle = s.sql_handle
 OPTION (RECOMPILE);
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Gathering row estimates', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES ('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
 INSERT #est_rows (query_hash, estimated_rows)
@@ -29344,6 +30235,7 @@ WHERE  c.n.exist('/p:StmtSimple[@StatementEstRows > 0]') = 1;
 	JOIN #est_rows er
 	ON er.query_hash = b.query_hash
 	OPTION (RECOMPILE);
+END;
 
 
 /*Begin plan cost calculations*/
@@ -29400,7 +30292,39 @@ ON  qp.sql_handle = b.sql_handle
 AND qp.query_plan.exist('/p:QueryPlan/p:Warnings/p:PlanAffectingConvert/@Expression[contains(., "CONVERT_IMPLICIT")]') = 1
 OPTION (RECOMPILE);
 
+IF @ExpertMode > 0
+BEGIN
+RAISERROR(N'Performing busy loops checks', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+UPDATE p
+SET    busy_loops = CASE WHEN (x.estimated_executions / 100.0) > x.estimated_rows THEN 1 END 
+FROM   #working_warnings p
+       JOIN (
+            SELECT qs.sql_handle,
+                   relop.value('sum(/p:RelOp/@EstimateRows)', 'float') AS estimated_rows ,
+                   relop.value('sum(/p:RelOp/@EstimateRewinds)', 'float') + relop.value('sum(/p:RelOp/@EstimateRebinds)', 'float') + 1.0 AS estimated_executions 
+            FROM   #relop qs
+       ) AS x ON p.sql_handle = x.sql_handle
+OPTION (RECOMPILE);
+END; 
 
+
+RAISERROR(N'Performing TVF join check', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+UPDATE p
+SET    p.tvf_join = CASE WHEN x.tvf_join = 1 THEN 1 END
+FROM   #working_warnings p
+       JOIN (
+			SELECT r.sql_handle,
+				   1 AS tvf_join
+			FROM #relop AS r
+			WHERE r.relop.exist('//p:RelOp[(@LogicalOp[.="Table-valued function"])]') = 1
+			AND   r.relop.exist('//p:RelOp[contains(@LogicalOp, "Join")]') = 1
+       ) AS x ON p.sql_handle = x.sql_handle
+OPTION (RECOMPILE);
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for operator warnings', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 , x AS (
@@ -29418,6 +30342,7 @@ SET	   b.warning_no_join_predicate = x.warning_no_join_predicate,
 FROM #working_warnings b
 JOIN x ON x.sql_handle = b.sql_handle
 OPTION (RECOMPILE);
+END; 
 
 
 RAISERROR(N'Checking for table variables', 0, 1) WITH NOWAIT;
@@ -29440,6 +30365,8 @@ WHERE x.first_char = '@'
 OPTION (RECOMPILE);
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for functions', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 , x AS (
@@ -29455,6 +30382,7 @@ SET	   b.function_count = x.function_count,
 FROM #working_warnings b
 JOIN x ON x.sql_handle = b.sql_handle
 OPTION (RECOMPILE);
+END;
 
 
 RAISERROR(N'Checking for expensive key lookups', 0, 1) WITH NOWAIT;
@@ -29510,7 +30438,6 @@ ON  b.sql_handle = y.sql_handle
 OPTION (RECOMPILE);
 
 
-
 RAISERROR(N'Checking for Optimistic cursors', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -29535,6 +30462,18 @@ WHERE n1.fn.exist('//p:CursorPlan/@ForwardOnly[.="true"]') = 1
 OPTION (RECOMPILE);
 
 
+RAISERROR(N'Checking if cursor is Fast Forward', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+UPDATE b
+SET b.is_fast_forward_cursor = 1
+FROM #working_warnings b
+JOIN #statements AS qs
+ON b.sql_handle = qs.sql_handle
+CROSS APPLY qs.statement.nodes('/p:StmtCursor') AS n1(fn)
+WHERE n1.fn.exist('//p:CursorPlan/@CursorActualType[.="FastForward"]') = 1
+OPTION (RECOMPILE);
+
+
 RAISERROR(N'Checking for Dynamic cursors', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -29546,6 +30485,9 @@ CROSS APPLY s.statement.nodes('/p:StmtCursor') AS n1(fn)
 WHERE n1.fn.exist('//p:CursorPlan/@CursorActualType[.="Dynamic"]') = 1
 OPTION (RECOMPILE);
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for bad scans and plan forcing', 0, 1) WITH NOWAIT;
 ;WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -29578,8 +30520,11 @@ FROM   #relop r
 CROSS APPLY r.relop.nodes('//p:TableScan') AS q(n)
 ) AS x ON b.sql_handle = x.sql_handle
 OPTION (RECOMPILE);
+END;
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for computed columns that reference scalar UDFs', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -29593,6 +30538,7 @@ CROSS APPLY r.relop.nodes('/p:RelOp/p:ComputeScalar/p:DefinedValues/p:DefinedVal
 WHERE n.fn.exist('/p:RelOp/p:ComputeScalar/p:DefinedValues/p:DefinedValue/p:ColumnReference[(@ComputedColumn[.="1"])]') = 1
 ) AS x ON x.sql_handle = b.sql_handle
 OPTION (RECOMPILE);
+END;
 
 
 RAISERROR(N'Checking for filters that reference scalar UDFs', 0, 1) WITH NOWAIT;
@@ -29610,6 +30556,8 @@ CROSS APPLY r.relop.nodes('/p:RelOp/p:Filter/p:Predicate/p:ScalarOperator/p:Comp
 OPTION (RECOMPILE);
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking modification queries that hit lots of indexes', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),	
 IndexOps AS 
@@ -29661,8 +30609,11 @@ SET b.index_insert_count = iops.index_insert_count,
 FROM #working_warnings AS b
 JOIN iops ON  iops.query_hash = b.query_hash
 OPTION (RECOMPILE);
+END;
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for Spatial index use', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -29676,7 +30627,7 @@ CROSS APPLY r.relop.nodes('/p:RelOp//p:Object') n(fn)
 WHERE n.fn.exist('(@IndexKind[.="Spatial"])') = 1
 ) AS x ON x.sql_handle = b.sql_handle
 OPTION (RECOMPILE);
-
+END;
 
 RAISERROR(N'Checking for forced serialization', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
@@ -29690,6 +30641,8 @@ AND qp.query_plan.exist('/p:QueryPlan/@NonParallelPlanReason') = 1
 OPTION (RECOMPILE);
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for ColumnStore queries operating in Row Mode instead of Batch Mode', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -29703,8 +30656,11 @@ FROM   #relop r
 WHERE r.relop.exist('/p:RelOp/p:IndexScan[(@Storage[.="ColumnStore"])]') = 1
 ) AS x ON x.sql_handle = b.sql_handle
 OPTION (RECOMPILE);
+END;
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR('Checking for row level security only', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE  b
@@ -29714,7 +30670,11 @@ JOIN #statements s
 ON s.query_hash = b.query_hash 
 WHERE s.statement.exist('/p:StmtSimple/@SecurityPolicyApplied[.="true"]') = 1
 OPTION (RECOMPILE);
+END;
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR('Checking for wonky Index Spools', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES (
     'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
@@ -29745,14 +30705,20 @@ JOIN spools sp
 ON ww.plan_id = sp.plan_id
 AND ww.query_id = sp.query_id
 OPTION (RECOMPILE);
+END;
 
 
 IF (PARSENAME(CONVERT(VARCHAR(128), SERVERPROPERTY ('PRODUCTVERSION')), 4)) >= 14
+OR ((PARSENAME(CONVERT(VARCHAR(128), SERVERPROPERTY ('PRODUCTVERSION')), 4)) = 13
+	AND PARSENAME(CONVERT(VARCHAR(128), SERVERPROPERTY ('PRODUCTVERSION')), 2) >= 5026)
 
 BEGIN
 
-RAISERROR(N'Beginning 2017 specfic checks', 0, 1) WITH NOWAIT;
+RAISERROR(N'Beginning 2017 and 2016 SP2 specfic checks', 0, 1) WITH NOWAIT;
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR('Gathering stats information', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 INSERT #stats_agg WITH (TABLOCK)
@@ -29784,8 +30750,12 @@ FROM #working_warnings AS b
 JOIN stale_stats os
 ON b.sql_handle = os.sql_handle
 OPTION (RECOMPILE);
+END;
 
 
+IF (PARSENAME(CONVERT(VARCHAR(128), SERVERPROPERTY ('PRODUCTVERSION')), 4)) >= 14
+	AND @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for Adaptive Joins', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 aj AS (
@@ -29800,7 +30770,11 @@ FROM #working_warnings AS b
 JOIN aj
 ON b.sql_handle = aj.sql_handle
 OPTION (RECOMPILE);
+END; 
 
+
+IF @ExpertMode > 0
+BEGIN;
 RAISERROR(N'Checking for Row Goals', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 row_goals AS(
@@ -29814,7 +30788,7 @@ FROM #working_warnings b
 JOIN row_goals
 ON b.query_hash = row_goals.query_hash
 OPTION (RECOMPILE);
-
+END;
 
 END; 
 
@@ -29823,7 +30797,7 @@ RAISERROR(N'Performing query level checks', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE  b
 SET     b.missing_index_count = query_plan.value('count(//p:QueryPlan/p:MissingIndexes/p:MissingIndexGroup)', 'int') ,
-		b.unmatched_index_count = query_plan.value('count(//p:QueryPlan/p:UnmatchedIndexes/p:Parameterization/p:Object)', 'int') 
+		b.unmatched_index_count = CASE WHEN is_trivial <> 1 THEN query_plan.value('count(//p:QueryPlan/p:UnmatchedIndexes/p:Parameterization/p:Object)', 'int') END
 FROM    #query_plan qp
 JOIN #working_warnings AS b
 ON b.query_hash = qp.query_hash
@@ -29866,6 +30840,7 @@ JOIN #trace_flags tf
 ON tf.sql_handle = b.sql_handle 
 OPTION (RECOMPILE);
 
+
 RAISERROR(N'Checking for MSTVFs', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -29876,6 +30851,8 @@ ON b.sql_handle = r.sql_handle
 WHERE  r.relop.exist('/p:RelOp[(@EstimateRows="100" or @EstimateRows="1") and @LogicalOp="Table-valued function"]') = 1
 OPTION (RECOMPILE);
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for many to many merge joins', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -29885,7 +30862,11 @@ JOIN #working_warnings AS b
 ON b.sql_handle = r.sql_handle
 WHERE  r.relop.exist('/p:RelOp/p:Merge/@ManyToMany[.="1"]') = 1
 OPTION (RECOMPILE);
+END;
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Is Paul White Electric?', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 is_paul_white_electric AS (
@@ -29901,6 +30882,9 @@ FROM   #working_warnings AS b
 JOIN is_paul_white_electric ipwe 
 ON ipwe.sql_handle = b.sql_handle 
 OPTION (RECOMPILE);
+END;
+
+
 
 RAISERROR(N'Checking for non-sargable predicates', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
@@ -29940,11 +30924,6 @@ JOIN    #working_warnings AS b
     ON b.query_hash = d.query_hash
 OPTION ( RECOMPILE );
 
-IF EXISTS (   SELECT 1
-              FROM   #working_warnings AS ww
-              WHERE  ww.implicit_conversions = 1
-                     OR ww.proc_or_function_name <> N'Statement' )
-    BEGIN
 
         RAISERROR(N'Getting information about implicit conversions and stored proc parameters', 0, 1) WITH NOWAIT;
 
@@ -30078,14 +31057,43 @@ IF EXISTS (   SELECT 1
 		FROM   #stored_proc_info AS s
 		OPTION (RECOMPILE);
 
+		
+		RAISERROR(N'Updating SET options', 0, 1) WITH NOWAIT;
+		WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+		UPDATE s
+		SET set_options = set_options.ansi_set_options
+		FROM #stored_proc_info AS s
+		JOIN (
+				SELECT  x.sql_handle,
+						N'SET ANSI_NULLS = ' + CASE WHEN [ANSI_NULLS] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+						N'SET ANSI_PADDING = ' + CASE WHEN [ANSI_PADDING] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+						N'SET ANSI_WARNINGS = ' + CASE WHEN [ANSI_WARNINGS] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+						N'SET ARITHABORT = ' + CASE WHEN [ARITHABORT] = 'true' THEN N'ON ' ELSE N' OFF ' END + NCHAR(10) +
+						N'SET CONCAT_NULL_YIELDS_NULL = ' + CASE WHEN [CONCAT_NULL_YIELDS_NULL] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+						N'SET NUMERIC_ROUNDABORT = ' + CASE WHEN [NUMERIC_ROUNDABORT] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+						N'SET QUOTED_IDENTIFIER = ' + CASE WHEN [QUOTED_IDENTIFIER] = 'true' THEN N'ON ' ELSE N'OFF ' + NCHAR(10) END AS [ansi_set_options]
+				FROM (
+					SELECT
+						s.sql_handle,
+						so.o.value('@ANSI_NULLS', 'NVARCHAR(20)') AS [ANSI_NULLS],
+						so.o.value('@ANSI_PADDING', 'NVARCHAR(20)') AS [ANSI_PADDING],
+						so.o.value('@ANSI_WARNINGS', 'NVARCHAR(20)') AS [ANSI_WARNINGS],
+						so.o.value('@ARITHABORT', 'NVARCHAR(20)') AS [ARITHABORT],
+						so.o.value('@CONCAT_NULL_YIELDS_NULL', 'NVARCHAR(20)') AS [CONCAT_NULL_YIELDS_NULL],
+						so.o.value('@NUMERIC_ROUNDABORT', 'NVARCHAR(20)') AS [NUMERIC_ROUNDABORT],
+						so.o.value('@QUOTED_IDENTIFIER', 'NVARCHAR(20)') AS [QUOTED_IDENTIFIER]
+					FROM #statements AS s
+					CROSS APPLY s.statement.nodes('//p:StatementSetOptions') AS so(o)
+				   ) AS x
+		) AS set_options ON set_options.sql_handle = s.sql_handle
+		OPTION(RECOMPILE);
+
+
 		RAISERROR(N'Updating conversion XML', 0, 1) WITH NOWAIT;
 		WITH precheck AS (
 		SELECT spi.sql_handle,
 			   spi.proc_name,
-					CONVERT(XML, 
-					N'<ClickMe><![CDATA['
-					+ @cr + @lf
-					+ CASE WHEN spi.proc_name <> 'Statement' 
+					(SELECT CASE WHEN spi.proc_name <> 'Statement' 
 						   THEN N'The stored procedure ' + spi.proc_name 
 						   ELSE N'This ad hoc statement' 
 					  END
@@ -30137,9 +31145,8 @@ IF EXISTS (   SELECT 1
 						FROM #stored_proc_info AS spi2
 						WHERE spi.sql_handle = spi2.sql_handle
 						FOR XML PATH(N''), TYPE).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 1, N'')
-					+ CHAR(10)
-					+ N']]></ClickMe>'
-					) AS implicit_conversion_info
+					AS [processing-instruction(ClickMe)] FOR XML PATH(''), TYPE )
+					AS implicit_conversion_info
 		FROM #stored_proc_info AS spi
 		GROUP BY spi.sql_handle, spi.proc_name
 		)
@@ -30150,12 +31157,12 @@ IF EXISTS (   SELECT 1
         ON pk.sql_handle = b.sql_handle
         OPTION (RECOMPILE);
 
-		RAISERROR(N'Updating cached parameter XML', 0, 1) WITH NOWAIT;
+		RAISERROR(N'Updating cached parameter XML for procs', 0, 1) WITH NOWAIT;
 		WITH precheck AS (
 		SELECT spi.sql_handle,
 			   spi.proc_name,
-		CONVERT(XML, 
-					N'<ClickMe><![CDATA['
+			   (SELECT set_options
+					+ @cr + @lf
 					+ @cr + @lf
 					+ N'EXEC ' 
 					+ spi.proc_name 
@@ -30176,31 +31183,73 @@ IF EXISTS (   SELECT 1
 						WHERE spi.sql_handle = spi2.sql_handle
 						AND spi2.proc_name <> N'Statement'
 						FOR XML PATH(N''), TYPE).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 1, N'')
-					+ @cr + @lf
-					+ N']]></ClickMe>'
-					) AS cached_execution_parameters
+					AS [processing-instruction(ClickMe)] FOR XML PATH(''), TYPE )
+					AS cached_execution_parameters
 		FROM #stored_proc_info AS spi
-		GROUP BY spi.sql_handle, spi.proc_name
+		GROUP BY spi.sql_handle, spi.proc_name, set_options
 		) 
 		UPDATE b
 		SET b.cached_execution_parameters = pk.cached_execution_parameters
         FROM   #working_warnings AS b
         JOIN   precheck AS pk
         ON pk.sql_handle = b.sql_handle
+		WHERE b.proc_or_function_name <> N'Statement'
         OPTION (RECOMPILE);
 
 
-    END; --End implicit conversion information gathering
+	RAISERROR(N'Updating cached parameter XML for statements', 0, 1) WITH NOWAIT;
+	WITH precheck AS (
+	SELECT spi.sql_handle,
+			   spi.proc_name,
+		   (SELECT 
+				set_options
+				+ @cr + @lf
+				+ @cr + @lf
+				+ N' See QueryText column for full query text'
+				+ @cr + @lf
+				+ @cr + @lf
+				+ STUFF((
+					SELECT DISTINCT N', ' 
+							+ CASE WHEN spi2.variable_name <> N'**no_variable**' AND spi2.compile_time_value <> N'**idk_man**'
+									THEN spi2.variable_name + N' = '
+									ELSE + @cr + @lf + N' We could not find any cached parameter values for this stored proc. ' 
+							  END
+							+ CASE WHEN spi2.variable_name = N'**no_variable**' OR spi2.compile_time_value = N'**idk_man**'
+								   THEN + @cr + @lf + N' Possible reasons include declared variables inside the procedure, recompile hints, etc. '
+								   WHEN spi2.compile_time_value = N'NULL' 
+								   THEN spi2.compile_time_value 
+								   ELSE RTRIM(spi2.compile_time_value)
+							  END
+					FROM #stored_proc_info AS spi2
+					WHERE spi.sql_handle = spi2.sql_handle
+					AND spi2.proc_name = N'Statement'
+					AND spi2.variable_name NOT LIKE N'%msparam%'
+					FOR XML PATH(N''), TYPE).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 1, N'')
+				AS [processing-instruction(ClickMe)] FOR XML PATH(''), TYPE )
+				AS cached_execution_parameters
+	FROM #stored_proc_info AS spi
+	GROUP BY spi.sql_handle, spi.proc_name, spi.set_options
+	) 
+	UPDATE b
+	SET b.cached_execution_parameters = pk.cached_execution_parameters
+    FROM   #working_warnings AS b
+    JOIN   precheck AS pk
+    ON pk.sql_handle = b.sql_handle
+	WHERE b.proc_or_function_name = N'Statement'
+    OPTION (RECOMPILE);
 
 
+RAISERROR(N'Filling in implicit conversion info', 0, 1) WITH NOWAIT;
 UPDATE b
-SET    b.implicit_conversion_info = CASE WHEN b.implicit_conversion_info IS NULL THEN 
-											N'<?NoNeedToClickMe -- N/A --?>'
-                                         ELSE b.implicit_conversion_info
+SET    b.implicit_conversion_info = CASE WHEN b.implicit_conversion_info IS NULL 
+									OR CONVERT(NVARCHAR(4000), b.implicit_conversion_info) = N''
+									THEN N'<?NoNeedToClickMe -- N/A --?>'
+                                    ELSE b.implicit_conversion_info
                                     END,
-       b.cached_execution_parameters = CASE WHEN b.cached_execution_parameters IS NULL THEN
-                                                N'<?NoNeedToClickMe -- N/A --?>'
-                                            ELSE b.cached_execution_parameters
+       b.cached_execution_parameters = CASE WHEN b.cached_execution_parameters IS NULL 
+									   OR CONVERT(NVARCHAR(4000), b.cached_execution_parameters) = N''
+									   THEN N'<?NoNeedToClickMe -- N/A --?>'
+                                       ELSE b.cached_execution_parameters
                                        END
 FROM   #working_warnings AS b
 OPTION (RECOMPILE);
@@ -30327,7 +31376,7 @@ IF EXISTS
 		OPTION (RECOMPILE);
 
 	
-	END
+	END;
 
 	RAISERROR(N'Filling in missing index blanks', 0, 1) WITH NOWAIT;
 	UPDATE ww
@@ -30355,8 +31404,8 @@ SET    b.frequent_execution = CASE WHEN wm.xpm > @execution_threshold THEN 1 END
 	   b.is_sort_expensive = CASE WHEN b.query_cost >= (@ctp / 2) AND b.sort_cost >= b.query_cost * .5 THEN 1 END,
 	   b.is_remote_query_expensive = CASE WHEN b.remote_query_cost >= b.query_cost * .05 THEN 1 END,
 	   b.is_unused_grant = CASE WHEN percent_memory_grant_used <= @memory_grant_warning_percent AND min_grant_kb > @min_memory_per_query THEN 1 END,
-	   b.long_running_low_cpu = CASE WHEN wm.avg_duration > wm.avg_cpu_time * 4 THEN 1 END,
-	   b.low_cost_high_cpu = CASE WHEN b.query_cost < @ctp AND wm.avg_cpu_time > 500. AND b.query_cost * 10 < wm.avg_cpu_time THEN 1 END,
+	   b.long_running_low_cpu = CASE WHEN wm.avg_duration > wm.avg_cpu_time * 4 AND avg_cpu_time < 500. THEN 1 END,
+	   b.low_cost_high_cpu = CASE WHEN b.query_cost < 10 AND wm.avg_cpu_time > 5000. THEN 1 END,
 	   b.is_spool_expensive = CASE WHEN b.query_cost > (@ctp / 2) AND b.index_spool_cost >= b.query_cost * .1 THEN 1 END,
 	   b.is_spool_more_rows = CASE WHEN b.index_spool_rows >= wm.min_rowcount THEN 1 END,
 	   b.is_bad_estimate = CASE WHEN wm.avg_rowcount > 0 AND (b.estimated_rows * 1000 < wm.avg_rowcount OR b.estimated_rows > wm.avg_rowcount * 1000) THEN 1 END,
@@ -30387,7 +31436,8 @@ SET    b.warnings = SUBSTRING(
                   CASE WHEN b.is_cursor = 1 THEN ', Cursor' 
 							+ CASE WHEN b.is_optimistic_cursor = 1 THEN '; optimistic' ELSE '' END
 							+ CASE WHEN b.is_forward_only_cursor = 0 THEN '; not forward only' ELSE '' END
-							+ CASE WHEN b.is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END			
+							+ CASE WHEN b.is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END
+                            + CASE WHEN b.is_fast_forward_cursor = 1 THEN '; fast forward' ELSE '' END			
 				  ELSE '' END +
                   CASE WHEN b.is_parallel = 1 THEN ', Parallel' ELSE '' END +
                   CASE WHEN b.near_parallel = 1 THEN ', Nearly Parallel' ELSE '' END +
@@ -30471,6 +31521,8 @@ RAISERROR(N'Checking for parameter sniffing symptoms', 0, 1) WITH NOWAIT;
 
 UPDATE b
 SET b.parameter_sniffing_symptoms = 
+CASE WHEN b.count_executions < 4 THEN 'Too few executions to compare (< 4).'
+	ELSE													
 	SUBSTRING(  
 				/*Duration*/
 				CASE WHEN (b.min_duration * 100) < (b.avg_duration) THEN ', Fast sometimes' ELSE '' END +
@@ -30523,6 +31575,7 @@ SET b.parameter_sniffing_symptoms =
 				CASE WHEN b.last_log_bytes_used * 100 < b.avg_log_bytes_used  THEN ', Low log use run' ELSE '' END +
 				CASE WHEN b.last_log_bytes_used > b.avg_log_bytes_used * 100 THEN ', High log use last run' ELSE '' END 
 	, 2, 200000) 
+	END
 FROM #working_metrics AS b
 OPTION (RECOMPILE);
 
@@ -30795,6 +31848,19 @@ BEGIN
                     'http://brentozar.com/blitzcache/cursors-found-slow-queries/',
                     'Dynamic Cursors inhibit parallelism!.');
 
+		IF EXISTS (SELECT 1/0
+                   FROM   #working_warnings
+                   WHERE  is_cursor = 1
+				   AND is_fast_forward_cursor = 1
+                    )
+            INSERT INTO #warning_results (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+            VALUES (4,
+                    200,
+                    'Cursors',
+                    'Fast Forward Cursors',
+                    'http://brentozar.com/blitzcache/cursors-found-slow-queries/',
+                    'Fast forward cursors inhibit parallelism!.');
+					
         IF EXISTS (SELECT 1/0
                    FROM   #working_warnings
                    WHERE  is_forced_parameterized = 1
@@ -30900,6 +31966,32 @@ BEGIN
                     'Implicit Conversions',
                     'http://brentozar.com/go/implicit',
                     'One or more queries are comparing two fields that are not of the same data type.') ;
+
+        IF EXISTS (SELECT 1/0
+                   FROM   #working_warnings p
+                   WHERE  busy_loops = 1
+				   )
+        INSERT INTO #warning_results (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+        VALUES (
+                16,
+                100,
+                'Performance',
+                'Busy Loops',
+                'http://brentozar.com/blitzcache/busy-loops/',
+                'Operations have been found that are executed 100 times more often than the number of rows returned by each iteration. This is an indicator that something is off in query execution.');
+
+        IF EXISTS (SELECT 1/0
+                   FROM   #working_warnings p
+                   WHERE  tvf_join = 1
+				   )
+        INSERT INTO #warning_results (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+        VALUES (
+                17,
+                50,
+                'Performance',
+                'Joining to table valued functions',
+                'http://brentozar.com/blitzcache/tvf-join/',
+                'Execution plans have been found that join to table valued functions (TVFs). TVFs produce inaccurate estimates of the number of rows returned and can lead to any number of query plan problems.');
 
         IF EXISTS (SELECT 1/0
                    FROM   #working_warnings
@@ -31444,7 +32536,7 @@ BEGIN
                      100,
                      'Many to Many Merge',
                      'These use secret worktables that could be doing lots of reads',
-                     'link to blog post when published',
+                     'https://www.brentozar.com/archive/2018/04/many-mysteries-merge-joins/',
 					 'Occurs when join inputs aren''t known to be unique. Can be really bad when parallel.');
 
         IF EXISTS (SELECT 1/0
@@ -31456,7 +32548,7 @@ BEGIN
                      50,
                      'Non-SARGable queries',
                      'Queries may be using',
-                     'link to blog post when published',
+                     'http://brentozar.com/go/sargable',
 					 'Occurs when join inputs aren''t known to be unique. Can be really bad when parallel.');
 					
         IF EXISTS (SELECT 1/0
@@ -31657,7 +32749,7 @@ BEGIN
             URL,
             Details,
             CheckID
-    ORDER BY Priority ASC, CheckID ASC
+    ORDER BY Priority ASC, FindingsGroup, Finding, CheckID ASC
     OPTION (RECOMPILE);
 
 
@@ -31860,8 +32952,8 @@ BEGIN
 	SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 	DECLARE @Version VARCHAR(30);
-	SET @Version = '6.3';
-	SET @VersionDate = '20180301';
+	SET @Version = '6.5';
+	SET @VersionDate = '20180501';
 
 
 	IF @Help = 1
@@ -31930,13 +33022,13 @@ DECLARE  @ProductVersion NVARCHAR(128)
 						 N'LEFT JOIN ( SELECT DISTINCT
 												wait.session_id ,
 												( SELECT    TOP  5 waitwait.wait_type + N'' (''
-												           + CAST(SUM(waitwait.wait_time_ms) AS NVARCHAR(128))
+												           + CAST(MAX(waitwait.wait_time_ms) AS NVARCHAR(128))
 												           + N'' ms), ''
 												 FROM      sys.dm_exec_session_wait_stats AS waitwait
 												 WHERE     waitwait.session_id = wait.session_id
 												 GROUP BY  waitwait.wait_type
 												 HAVING SUM(waitwait.wait_time_ms) > 5
-												 ORDER BY  SUM(waitwait.wait_time_ms) DESC
+												 ORDER BY 1												 
 												 FOR
 												 XML PATH('''') ) AS session_wait_info
 										FROM    sys.dm_exec_session_wait_stats AS wait ) AS wt2
@@ -32011,19 +33103,29 @@ SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 							 WHEN r.blocking_session_id <> 0 AND s.session_id <> blocked.blocking_session_id 
 							 THEN blocked.blocking_session_id
 							ELSE NULL 
-						END AS blocking_session_id,
+						END AS blocking_session_id , 
 			            COALESCE(r.open_transaction_count, blocked.open_tran) AS open_transaction_count ,
+						CASE WHEN EXISTS (  SELECT 1 
+                                            FROM sys.dm_tran_active_transactions AS tat
+                                            JOIN sys.dm_tran_session_transactions AS tst
+                                            ON tst.transaction_id = tat.transaction_id
+                                            WHERE tat.name = ''implicit_transaction''
+                                            AND s.session_id = tst.session_id 
+                                         )  THEN 1 
+                             ELSE 0 
+                        END AS is_implicit_transaction ,
 					    s.nt_domain ,
 			            s.host_name ,
 			            s.login_name ,
 			            s.nt_user_name ,
-			            s.program_name 
+			            s.program_name
 						'
 						
 					IF @ExpertMode = 1
 					BEGIN
 					SET @StringToExecute += 
 			            N',
+						''DBCC FREEPROCCACHE ('' + CONVERT(NVARCHAR(128), r.plan_handle, 1) + '');'' AS fix_parameter_sniffing,						                        		
 			            s.client_interface_name ,
 			            s.login_time ,
 			            r.start_time ,
@@ -32099,7 +33201,7 @@ SET @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 			    LEFT JOIN ( SELECT DISTINCT
 			                        wait.session_id ,
 			                        ( SELECT    waitwait.wait_type + N'' (''
-			                                    + CAST(SUM(waitwait.wait_duration_ms) AS NVARCHAR(128))
+			                                    + CAST(MAX(waitwait.wait_duration_ms) AS NVARCHAR(128))
 			                                    + N'' ms) ''
 			                          FROM      sys.dm_os_waiting_tasks AS waitwait
 			                          WHERE     waitwait.session_id = wait.session_id
@@ -32232,7 +33334,16 @@ SELECT @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 							   THEN blocked.blocking_session_id
 							   ELSE NULL 
 						  END AS blocking_session_id,
-			            COALESCE(r.open_transaction_count, blocked.open_tran) AS open_transaction_count ,		
+			            COALESCE(r.open_transaction_count, blocked.open_tran) AS open_transaction_count ,
+						CASE WHEN EXISTS (  SELECT 1 
+                                            FROM sys.dm_tran_active_transactions AS tat
+                                            JOIN sys.dm_tran_session_transactions AS tst
+                                            ON tst.transaction_id = tat.transaction_id
+                                            WHERE tat.name = ''implicit_transaction''
+                                            AND s.session_id = tst.session_id 
+                                         )  THEN 1 
+                             ELSE 0 
+                        END AS is_implicit_transaction ,
 					    s.nt_domain ,
 			            s.host_name ,
 			            s.login_name ,
@@ -32243,6 +33354,7 @@ SELECT @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 					BEGIN
 					SET @StringToExecute += 						
 						N',
+						''DBCC FREEPROCCACHE ('' + CONVERT(NVARCHAR(128), r.plan_handle, 1) + '');'' AS fix_parameter_sniffing,						                        		
 			            s.client_interface_name ,
 			            s.login_time ,
 			            r.start_time ,		
@@ -32325,7 +33437,7 @@ SELECT @StringToExecute = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 						LEFT JOIN ( SELECT DISTINCT
 									                        wait.session_id ,
 									                        ( SELECT    waitwait.wait_type + N'' (''
-									                                    + CAST(SUM(waitwait.wait_duration_ms) AS NVARCHAR(128))
+									                                    + CAST(MAX(waitwait.wait_duration_ms) AS NVARCHAR(128))
 									                                    + N'' ms) ''
 									                          FROM      sys.dm_os_waiting_tasks AS waitwait
 									                          WHERE     waitwait.session_id = wait.session_id
@@ -32410,7 +33522,6 @@ GO
 IF OBJECT_ID('dbo.sp_DatabaseRestore') IS NULL
 	EXEC ('CREATE PROCEDURE dbo.sp_DatabaseRestore AS RETURN 0;');
 GO
-
 ALTER PROCEDURE [dbo].[sp_DatabaseRestore]
 	  @Database NVARCHAR(128) = NULL, 
 	  @RestoreDatabaseName NVARCHAR(128) = NULL, 
@@ -32420,6 +33531,7 @@ ALTER PROCEDURE [dbo].[sp_DatabaseRestore]
 	  @MoveFiles BIT = 0, 
 	  @MoveDataDrive NVARCHAR(260) = NULL, 
 	  @MoveLogDrive NVARCHAR(260) = NULL, 
+	  @MoveFilestreamDrive NVARCHAR(260) = NULL,
 	  @TestRestore BIT = 0, 
 	  @RunCheckDB BIT = 0, 
 	  @RestoreDiff BIT = 0,
@@ -32428,6 +33540,7 @@ ALTER PROCEDURE [dbo].[sp_DatabaseRestore]
 	  @StandbyUndoPath NVARCHAR(MAX) = NULL,
 	  @RunRecovery BIT = 0, 
 	  @ForceSimpleRecovery BIT = 0,
+      @ExistingDBAction tinyint = 0,
 	  @StopAt NVARCHAR(14) = NULL,
 	  @OnlyLogsAfter NVARCHAR(14) = NULL,
 	  @Debug INT = 0, 
@@ -32437,9 +33550,9 @@ AS
 SET NOCOUNT ON;
 
 /*Versioning details*/
-	DECLARE @Version NVARCHAR(30);
-	SET @Version = '6.3';
-	SET @VersionDate = '20180301';
+DECLARE @Version NVARCHAR(30);
+SET @Version = '6.5';
+SET @VersionDate = '20180501';
 
 
 IF @Help = 1
@@ -32619,7 +33732,8 @@ DECLARE @cmd NVARCHAR(4000) = N'', --Holds xp_cmdshell command
 		@i TINYINT = 1,  --Maintains loop to continue logs
 		@LogFirstLSN NUMERIC(25, 0), --Holds first LSN in log backup headers
 		@LogLastLSN NUMERIC(25, 0), --Holds last LSN in log backup headers
-		@FileListParamSQL NVARCHAR(4000) = N''; --Holds INSERT list for #FileListParameters
+		@FileListParamSQL NVARCHAR(4000) = N'', --Holds INSERT list for #FileListParameters
+        @RestoreDatabaseID smallint;    --Holds DB_ID of @RestoreDatabaseName
 
 DECLARE @FileList TABLE
 (
@@ -32763,13 +33877,25 @@ IF (SELECT RIGHT(@MoveDataDrive, 1)) <> '\' --Has to end in a '\'
 /*Move Log File*/
 IF NULLIF(@MoveLogDrive, '') IS NULL
 	BEGIN
-		RAISERROR('Getting default log drive for @@MoveLogDrive', 0, 1) WITH NOWAIT;
+		RAISERROR('Getting default log drive for @MoveLogDrive', 0, 1) WITH NOWAIT;
 		SET @MoveLogDrive  = CAST(SERVERPROPERTY('InstanceDefaultLogPath') AS nvarchar(260));
 	END;
 IF (SELECT RIGHT(@MoveLogDrive, 1)) <> '\' --Has to end in a '\'
 	BEGIN
 		RAISERROR('Fixing @MoveDataDrive to add a "\"', 0, 1) WITH NOWAIT;
 		SET @MoveLogDrive += N'\';
+	END;
+
+/*Move Filestream File*/
+IF NULLIF(@MoveFilestreamDrive, '') IS NULL
+	BEGIN
+		RAISERROR('Setting default data drive for @MoveFilestreamDrive', 0, 1) WITH NOWAIT;
+		SET @MoveFilestreamDrive  = CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS nvarchar(260));
+	END;
+IF (SELECT RIGHT(@MoveFilestreamDrive, 1)) <> '\' --Has to end in a '\'
+	BEGIN
+		RAISERROR('Fixing @MoveFilestreamDrive to add a "\"', 0, 1) WITH NOWAIT;
+		SET @MoveFilestreamDrive += N'\';
 	END;
 
 /*Standby Undo File*/
@@ -32779,19 +33905,15 @@ IF (SELECT RIGHT(@StandbyUndoPath, 1)) <> '\' --Has to end in a '\'
 		SET @StandbyUndoPath += N'\';
 	END;
 
-
 IF @RestoreDatabaseName IS NULL
-	BEGIN
-		SET @RestoreDatabaseName = QUOTENAME(@Database);
-	END
-ELSE
-	BEGIN
-		SET @RestoreDatabaseName = QUOTENAME(@RestoreDatabaseName)
-	END
+BEGIN
+	SET @RestoreDatabaseName = @Database;
+END
+SET @RestoreDatabaseID = DB_ID(@RestoreDatabaseName);
+SET @RestoreDatabaseName = QUOTENAME(@RestoreDatabaseName);
 
 
 IF @BackupPathFull IS NOT NULL
-
 BEGIN
 
 -- Get list of files 
@@ -32935,27 +34057,91 @@ SET @HeadersSQL += N'EXEC (''RESTORE HEADERONLY FROM DISK=''''{Path}'''''')';
 
 
 IF @MoveFiles = 1
-	BEGIN
-		
-		RAISERROR('@MoveFiles = 1, adjusting paths', 0, 1) WITH NOWAIT;
+BEGIN
+	RAISERROR('@MoveFiles = 1, adjusting paths', 0, 1) WITH NOWAIT;
 	
-		WITH Files
-	    AS (
-			SELECT N', MOVE ''' + LogicalName + N''' TO ''' +
-				CASE
-					WHEN Type = 'D' THEN @MoveDataDrive
-					WHEN Type = 'L' THEN @MoveLogDrive
-				END + CASE WHEN @Database = @RestoreDatabaseName THEN REVERSE(LEFT(REVERSE(PhysicalName), CHARINDEX('\', REVERSE(PhysicalName), 1) -1)) + '''' 
-					  ELSE REPLACE(REVERSE(LEFT(REVERSE(PhysicalName), CHARINDEX('\', REVERSE(PhysicalName), 1) -1)), @Database, SUBSTRING(@RestoreDatabaseName, 2, LEN(@RestoreDatabaseName) -2)) + '''' 
-					  END AS logicalcmds
-			FROM #FileListParameters)
+	WITH Files
+	AS (
+		SELECT N', MOVE ''' + LogicalName + N''' TO ''' +
+			CASE
+				WHEN Type = 'D' THEN @MoveDataDrive
+				WHEN Type = 'L' THEN @MoveLogDrive
+				WHEN Type = 'S' THEN @MoveFilestreamDrive
+			END + CASE WHEN @Database = @RestoreDatabaseName THEN REVERSE(LEFT(REVERSE(PhysicalName), CHARINDEX('\', REVERSE(PhysicalName), 1) -1)) + '''' 
+					ELSE REPLACE(REVERSE(LEFT(REVERSE(PhysicalName), CHARINDEX('\', REVERSE(PhysicalName), 1) -1)), @Database, SUBSTRING(@RestoreDatabaseName, 2, LEN(@RestoreDatabaseName) -2)) + '''' 
+					END AS logicalcmds
+		FROM #FileListParameters)
 	
-		SELECT @MoveOption = @MoveOption + Files.logicalcmds
-		FROM Files;
+	SELECT @MoveOption = @MoveOption + Files.logicalcmds
+	FROM Files;
 		
-		IF @Debug = 1 PRINT @MoveOption
+	IF @Debug = 1 PRINT @MoveOption
 
-	END;
+END;
+
+/*Process @ExistingDBAction flag */
+IF @ExistingDBAction BETWEEN 1 AND 3
+BEGIN
+    IF @RestoreDatabaseID IS NOT NULL
+    BEGIN
+
+        IF @ExistingDBAction = 1
+        BEGIN
+            RAISERROR('Setting single user', 0, 1) WITH NOWAIT;
+
+            SET @sql = N'ALTER DATABASE ' + @RestoreDatabaseName + ' SET SINGLE_USER WITH ROLLBACK IMMEDIATE; ' + NCHAR(13);
+            IF @Debug = 1
+		    BEGIN
+			    IF @sql IS NULL PRINT '@sql is NULL for SINGLE_USER';
+			    PRINT @sql;
+		    END;
+		    IF @Debug IN (0, 1)
+			    EXECUTE sp_executesql @sql;
+        END
+
+        IF @ExistingDBAction IN (2, 3)
+        BEGIN
+            RAISERROR('Killing connections', 0, 1) WITH NOWAIT;
+
+            SET @sql = N'/* Kill connections */' + NCHAR(13);
+            SELECT 
+                @sql = @sql + N'KILL ' + CAST(spid as nvarchar(5)) + N';' + NCHAR(13)
+            FROM
+                --database_ID was only added to sys.dm_exec_sessions in SQL Server 2012 but we need to support older
+                sys.sysprocesses
+            WHERE
+                dbid = @RestoreDatabaseID;
+
+            IF @Debug = 1
+		    BEGIN
+			    IF @sql IS NULL PRINT '@sql is NULL for Kill connections';
+			    PRINT @sql;
+		    END;
+            IF @Debug IN (0, 1)
+			    EXECUTE sp_executesql @sql;
+        END
+
+        IF @ExistingDBAction = 3
+        BEGIN
+            RAISERROR('Dropping database', 0, 1) WITH NOWAIT;
+            
+            SET @sql = N'DROP DATABASE ' + @RestoreDatabaseName + NCHAR(13);
+            IF @Debug = 1
+		    BEGIN
+			    IF @sql IS NULL PRINT '@sql is NULL for DROP DATABASE';
+			    PRINT @sql;
+		    END;
+		    IF @Debug IN (0, 1)
+			    EXECUTE sp_executesql @sql;
+        END
+
+    END
+    ELSE
+        RAISERROR('@ExistingDBAction > 0, but no existing @RestoreDatabaseName', 0, 1) WITH NOWAIT;
+END
+ELSE
+    RAISERROR('@ExistingDBAction %u so do nothing', 0, 1, @ExistingDBAction) WITH NOWAIT;
+
 
 
 IF @ContinueLogs = 0
@@ -33343,14 +34529,12 @@ FETCH NEXT FROM BackupFiles INTO @BackupFile;
 	
 	CLOSE BackupFiles;
 
-DEALLOCATE BackupFiles;  
+    DEALLOCATE BackupFiles;  
 
-				IF @Debug = 1
-				BEGIN
-					SELECT '#Headers' AS table_name, * FROM #Headers AS h
-				END
-
-
+	IF @Debug = 1
+	BEGIN
+		SELECT '#Headers' AS table_name, * FROM #Headers AS h
+	END
 END
 
 -- Put database in a useable state 
@@ -33365,7 +34549,7 @@ IF @RunRecovery = 1
 			END; 
 
 		IF @Debug IN (0, 1)
-			EXECUTE sp_executesql @sql;
+			EXECUTE @sql = [dbo].[CommandExecute] @Command = @sql, @CommandType = 'RESTORE DATABASE', @Mode = 1, @DatabaseName = @Database, @LogToTable = 'Y', @Execute = 'Y';
 	END;
 
 -- Ensure simple recovery model
@@ -33380,7 +34564,7 @@ IF @ForceSimpleRecovery = 1
 			END; 
 
 		IF @Debug IN (0, 1)
-			EXECUTE sp_executesql @sql;
+			EXECUTE @sql = [dbo].[CommandExecute] @Command = @sql, @CommandType = 'ALTER DATABASE', @Mode = 1, @DatabaseName = @Database, @LogToTable = 'Y', @Execute = 'Y';
 	END;	    
 
  -- Run checkdb against this database
@@ -33395,7 +34579,7 @@ IF @RunCheckDB = 1
 			END; 
 		
 		IF @Debug IN (0, 1)
-			EXECUTE sys.sp_executesql @sql;
+			EXECUTE @sql = [dbo].[CommandExecute] @Command = @sql, @CommandType = 'INTEGRITY CHECK', @Mode = 1, @DatabaseName = @Database, @LogToTable = 'Y', @Execute = 'Y';
 	END;
 
  -- If test restore then blow the database away (be careful)
@@ -33410,12 +34594,12 @@ IF @TestRestore = 1
 			END; 
 		
 		IF @Debug IN (0, 1)
-			EXECUTE sp_executesql @sql;
+			EXECUTE @sql = [dbo].[CommandExecute] @Command = @sql, @CommandType = 'DROP DATABASE', @Mode = 1, @DatabaseName = @Database, @LogToTable = 'Y', @Execute = 'Y';
 
 	END;
 
-GO
 
+GO
 USE [master];
 GO
 
@@ -33453,8 +34637,8 @@ AS
     BEGIN
         SET NOCOUNT ON;
 		DECLARE @Version VARCHAR(30);
-		SET @Version = '2.3';
-		SET @VersionDate = '20180301';
+		SET @Version = '2.5';
+		SET @VersionDate = '20180501';
 
         IF ( (@command1 IS NOT NULL AND @command IS NOT NULL)
             OR (@command1 IS NULL AND @command IS NULL) )

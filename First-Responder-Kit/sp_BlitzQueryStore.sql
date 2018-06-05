@@ -45,6 +45,7 @@ ALTER PROCEDURE dbo.sp_BlitzQueryStore
     @HideSummary BIT = 0 ,
 	@SkipXML BIT = 0,
 	@Debug BIT = 0,
+	@ExpertMode BIT = 0,
 	@VersionDate DATETIME = NULL OUTPUT
 WITH RECOMPILE
 AS
@@ -54,8 +55,8 @@ SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE @Version NVARCHAR(30);
-	SET @Version = '2.3';
-	SET @VersionDate = '20180301';
+	SET @Version = '2.6';
+	SET @VersionDate = '20180601';
 
 DECLARE /*Variables for the variable Gods*/
 		@msg NVARCHAR(MAX) = N'', --Used to format RAISERROR messages in some places
@@ -541,6 +542,7 @@ CREATE TABLE #working_warnings
     is_cursor BIT,
 	is_optimistic_cursor BIT,
 	is_forward_only_cursor BIT,
+	is_fast_forward_cursor BIT,	
 	is_cursor_dynamic BIT,
     is_parallel BIT,
 	is_forced_serial BIT,
@@ -617,6 +619,8 @@ CREATE TABLE #working_warnings
 	is_mstvf BIT,
 	is_mm_join BIT,
     is_nonsargable BIT,
+	busy_loops BIT,
+	tvf_join BIT,
 	implicit_conversion_info XML,
 	cached_execution_parameters XML,
 	missing_indexes XML,
@@ -782,12 +786,13 @@ CREATE TABLE #stored_proc_info
 	converted_column_name NVARCHAR(258),
     compile_time_value NVARCHAR(258),
     proc_name NVARCHAR(1000),
-    column_name NVARCHAR(258),
-    converted_to NVARCHAR(258)
+    column_name NVARCHAR(4000),
+    converted_to NVARCHAR(258),
+	set_options NVARCHAR(1000)
 	INDEX tf_ix_ids CLUSTERED (sql_handle, query_hash)
 );
 
-DROP TABLE IF EXISTS #variable_info
+DROP TABLE IF EXISTS #variable_info;
 
 CREATE TABLE #variable_info
 (
@@ -800,7 +805,7 @@ CREATE TABLE #variable_info
 	INDEX vif_ix_ids CLUSTERED (sql_handle, query_hash)
 );
 
-DROP TABLE IF EXISTS #conversion_info
+DROP TABLE IF EXISTS #conversion_info;
 
 CREATE TABLE #conversion_info
 (
@@ -824,7 +829,7 @@ CREATE TABLE #conversion_info
 /* These tables support the Missing Index details clickable*/
 
 
-DROP TABLE IF EXISTS #missing_index_xml
+DROP TABLE IF EXISTS #missing_index_xml;
 
 CREATE TABLE #missing_index_xml
 (
@@ -834,7 +839,7 @@ CREATE TABLE #missing_index_xml
     index_xml XML
 );
 
-DROP TABLE IF EXISTS #missing_index_schema
+DROP TABLE IF EXISTS #missing_index_schema;
 
 CREATE TABLE #missing_index_schema
 (
@@ -848,7 +853,7 @@ CREATE TABLE #missing_index_schema
 );
 
 
-DROP TABLE IF EXISTS #missing_index_usage
+DROP TABLE IF EXISTS #missing_index_usage;
 
 CREATE TABLE #missing_index_usage
 (
@@ -862,7 +867,7 @@ CREATE TABLE #missing_index_usage
     index_xml XML
 );
 
-DROP TABLE IF EXISTS #missing_index_detail
+DROP TABLE IF EXISTS #missing_index_detail;
 
 CREATE TABLE #missing_index_detail
 (
@@ -877,7 +882,7 @@ CREATE TABLE #missing_index_detail
 );
 
 
-DROP TABLE IF EXISTS #missing_index_pretty
+DROP TABLE IF EXISTS #missing_index_pretty;
 
 CREATE TABLE #missing_index_pretty
 (
@@ -926,8 +931,8 @@ CREATE TABLE #missing_index_pretty
 			   + N')' 
 			   + CHAR(10)
 			   + CASE WHEN include IS NOT NULL
-					  THEN N'INCLUDE (' + include + N')'
-					  ELSE N''
+					  THEN N'INCLUDE (' + include + N') WITH (FILLFACTOR=100, ONLINE=?, SORT_IN_TEMPDB=?, DATA_COMPRESSION=?);'
+					  ELSE N' WITH (FILLFACTOR=100, ONLINE=?, SORT_IN_TEMPDB=?, DATA_COMPRESSION=?);'
 				 END
 			   + CHAR(10)
 			   + N'GO'
@@ -1031,8 +1036,6 @@ IF (@QueryIdFilter IS NOT NULL)
 					    '; 
 	END; 
 
-
-
 IF @Debug = 1
 	RAISERROR(N'Starting WHERE clause:', 0, 1) WITH NOWAIT;
 	PRINT @sql_where;
@@ -1048,7 +1051,6 @@ IF (@ExportToExcel = 1 OR @SkipXML = 1)
 	RAISERROR(N'Exporting to Excel or skipping XML, hiding summary', 0, 1) WITH NOWAIT;
 	SET @HideSummary = 1;
 	END;
-
 
 IF @StoredProcName IS NOT NULL
 	BEGIN 
@@ -1125,21 +1127,21 @@ SELECT   CONVERT(DATE, qsrs.last_execution_time) AS flat_date,
          SUM((qsrs.avg_logical_io_writes* 8 ) / 1024.) / SUM(qsrs.count_executions) AS total_avg_logical_io_writes_mb,
          SUM(( qsrs.avg_query_max_used_memory * 8 ) / 1024.) / SUM(qsrs.count_executions) AS total_avg_query_max_used_memory_mb,
          SUM(qsrs.avg_rowcount) AS total_rowcount,
-         SUM(qsrs.count_executions) AS total_count_executions'
+         SUM(qsrs.count_executions) AS total_count_executions';
 		 IF @new_columns = 1
 			BEGIN
 				SET @sql_select += N',
 									 SUM((qsrs.avg_log_bytes_used) / 1048576.) / SUM(qsrs.count_executions) AS total_avg_log_bytes_mb,
 									 SUM(avg_tempdb_space_used) /  SUM(qsrs.count_executions) AS total_avg_tempdb_space 
-									 '
-			END
+									 ';
+			END;
 		IF @new_columns = 0
 			BEGIN
 				SET @sql_select += N',
 									NULL AS total_avg_log_bytes_mb, 
 									NULL AS total_avg_tempdb_space
-									'
-			END
+									';
+			END;
 
 
 SET @sql_select += N'FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_runtime_stats AS qsrs
@@ -1849,7 +1851,8 @@ EXEC sys.sp_executesql  @stmt = @sql_select,
 /*This just helps us classify our queries*/
 UPDATE #working_metrics
 SET proc_or_function_name = N'Statement'
-WHERE proc_or_function_name IS NULL;
+WHERE proc_or_function_name IS NULL
+OPTION(RECOMPILE);
 
 
 /*
@@ -2066,7 +2069,8 @@ SET top_three_waits = CASE
 						WHEN @waitstats = 0 THEN N'The query store waits stats DMV is not available'
 						ELSE N'No Significant waits detected!'
 						END
-WHERE top_three_waits IS NULL;
+WHERE top_three_waits IS NULL
+OPTION(RECOMPILE);
 
 END;
 END TRY
@@ -2406,7 +2410,8 @@ ON  s.query_hash = b.query_hash
 WHERE s.statement.exist('/p:StmtSimple/@StatementOptmEarlyAbortReason[.="MemoryLimitExceeded"]') = 1
 OPTION (RECOMPILE);
 
-
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Performing index DML checks', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 index_dml AS (
@@ -2441,6 +2446,8 @@ table_dml AS (
 	ON t.query_hash = b.query_hash
 	WHERE t.table_dml = 1
 OPTION (RECOMPILE);
+END;
+
 
 RAISERROR(N'Gathering trivial plans', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
@@ -2459,6 +2466,8 @@ WHERE   s.statement.exist('//p:StmtSimple[@StatementOptmLevel[.="TRIVIAL"]]/p:Qu
 ON b.sql_handle = s.sql_handle
 OPTION (RECOMPILE);
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Gathering row estimates', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES ('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
 INSERT #est_rows (query_hash, estimated_rows)
@@ -2475,6 +2484,7 @@ WHERE  c.n.exist('/p:StmtSimple[@StatementEstRows > 0]') = 1;
 	JOIN #est_rows er
 	ON er.query_hash = b.query_hash
 	OPTION (RECOMPILE);
+END;
 
 
 /*Begin plan cost calculations*/
@@ -2531,7 +2541,39 @@ ON  qp.sql_handle = b.sql_handle
 AND qp.query_plan.exist('/p:QueryPlan/p:Warnings/p:PlanAffectingConvert/@Expression[contains(., "CONVERT_IMPLICIT")]') = 1
 OPTION (RECOMPILE);
 
+IF @ExpertMode > 0
+BEGIN
+RAISERROR(N'Performing busy loops checks', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+UPDATE p
+SET    busy_loops = CASE WHEN (x.estimated_executions / 100.0) > x.estimated_rows THEN 1 END 
+FROM   #working_warnings p
+       JOIN (
+            SELECT qs.sql_handle,
+                   relop.value('sum(/p:RelOp/@EstimateRows)', 'float') AS estimated_rows ,
+                   relop.value('sum(/p:RelOp/@EstimateRewinds)', 'float') + relop.value('sum(/p:RelOp/@EstimateRebinds)', 'float') + 1.0 AS estimated_executions 
+            FROM   #relop qs
+       ) AS x ON p.sql_handle = x.sql_handle
+OPTION (RECOMPILE);
+END; 
 
+
+RAISERROR(N'Performing TVF join check', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+UPDATE p
+SET    p.tvf_join = CASE WHEN x.tvf_join = 1 THEN 1 END
+FROM   #working_warnings p
+       JOIN (
+			SELECT r.sql_handle,
+				   1 AS tvf_join
+			FROM #relop AS r
+			WHERE r.relop.exist('//p:RelOp[(@LogicalOp[.="Table-valued function"])]') = 1
+			AND   r.relop.exist('//p:RelOp[contains(@LogicalOp, "Join")]') = 1
+       ) AS x ON p.sql_handle = x.sql_handle
+OPTION (RECOMPILE);
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for operator warnings', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 , x AS (
@@ -2549,6 +2591,7 @@ SET	   b.warning_no_join_predicate = x.warning_no_join_predicate,
 FROM #working_warnings b
 JOIN x ON x.sql_handle = b.sql_handle
 OPTION (RECOMPILE);
+END; 
 
 
 RAISERROR(N'Checking for table variables', 0, 1) WITH NOWAIT;
@@ -2571,6 +2614,8 @@ WHERE x.first_char = '@'
 OPTION (RECOMPILE);
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for functions', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 , x AS (
@@ -2586,6 +2631,7 @@ SET	   b.function_count = x.function_count,
 FROM #working_warnings b
 JOIN x ON x.sql_handle = b.sql_handle
 OPTION (RECOMPILE);
+END;
 
 
 RAISERROR(N'Checking for expensive key lookups', 0, 1) WITH NOWAIT;
@@ -2641,7 +2687,6 @@ ON  b.sql_handle = y.sql_handle
 OPTION (RECOMPILE);
 
 
-
 RAISERROR(N'Checking for Optimistic cursors', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -2666,6 +2711,18 @@ WHERE n1.fn.exist('//p:CursorPlan/@ForwardOnly[.="true"]') = 1
 OPTION (RECOMPILE);
 
 
+RAISERROR(N'Checking if cursor is Fast Forward', 0, 1) WITH NOWAIT;
+WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+UPDATE b
+SET b.is_fast_forward_cursor = 1
+FROM #working_warnings b
+JOIN #statements AS qs
+ON b.sql_handle = qs.sql_handle
+CROSS APPLY qs.statement.nodes('/p:StmtCursor') AS n1(fn)
+WHERE n1.fn.exist('//p:CursorPlan/@CursorActualType[.="FastForward"]') = 1
+OPTION (RECOMPILE);
+
+
 RAISERROR(N'Checking for Dynamic cursors', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -2677,6 +2734,9 @@ CROSS APPLY s.statement.nodes('/p:StmtCursor') AS n1(fn)
 WHERE n1.fn.exist('//p:CursorPlan/@CursorActualType[.="Dynamic"]') = 1
 OPTION (RECOMPILE);
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for bad scans and plan forcing', 0, 1) WITH NOWAIT;
 ;WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -2709,8 +2769,11 @@ FROM   #relop r
 CROSS APPLY r.relop.nodes('//p:TableScan') AS q(n)
 ) AS x ON b.sql_handle = x.sql_handle
 OPTION (RECOMPILE);
+END;
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for computed columns that reference scalar UDFs', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -2724,6 +2787,7 @@ CROSS APPLY r.relop.nodes('/p:RelOp/p:ComputeScalar/p:DefinedValues/p:DefinedVal
 WHERE n.fn.exist('/p:RelOp/p:ComputeScalar/p:DefinedValues/p:DefinedValue/p:ColumnReference[(@ComputedColumn[.="1"])]') = 1
 ) AS x ON x.sql_handle = b.sql_handle
 OPTION (RECOMPILE);
+END;
 
 
 RAISERROR(N'Checking for filters that reference scalar UDFs', 0, 1) WITH NOWAIT;
@@ -2741,6 +2805,8 @@ CROSS APPLY r.relop.nodes('/p:RelOp/p:Filter/p:Predicate/p:ScalarOperator/p:Comp
 OPTION (RECOMPILE);
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking modification queries that hit lots of indexes', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),	
 IndexOps AS 
@@ -2792,8 +2858,11 @@ SET b.index_insert_count = iops.index_insert_count,
 FROM #working_warnings AS b
 JOIN iops ON  iops.query_hash = b.query_hash
 OPTION (RECOMPILE);
+END;
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for Spatial index use', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -2807,7 +2876,7 @@ CROSS APPLY r.relop.nodes('/p:RelOp//p:Object') n(fn)
 WHERE n.fn.exist('(@IndexKind[.="Spatial"])') = 1
 ) AS x ON x.sql_handle = b.sql_handle
 OPTION (RECOMPILE);
-
+END;
 
 RAISERROR(N'Checking for forced serialization', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
@@ -2821,6 +2890,8 @@ AND qp.query_plan.exist('/p:QueryPlan/@NonParallelPlanReason') = 1
 OPTION (RECOMPILE);
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for ColumnStore queries operating in Row Mode instead of Batch Mode', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -2834,8 +2905,11 @@ FROM   #relop r
 WHERE r.relop.exist('/p:RelOp/p:IndexScan[(@Storage[.="ColumnStore"])]') = 1
 ) AS x ON x.sql_handle = b.sql_handle
 OPTION (RECOMPILE);
+END;
 
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR('Checking for row level security only', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE  b
@@ -2845,7 +2919,11 @@ JOIN #statements s
 ON s.query_hash = b.query_hash 
 WHERE s.statement.exist('/p:StmtSimple/@SecurityPolicyApplied[.="true"]') = 1
 OPTION (RECOMPILE);
+END;
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR('Checking for wonky Index Spools', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES (
     'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
@@ -2876,14 +2954,20 @@ JOIN spools sp
 ON ww.plan_id = sp.plan_id
 AND ww.query_id = sp.query_id
 OPTION (RECOMPILE);
+END;
 
 
 IF (PARSENAME(CONVERT(VARCHAR(128), SERVERPROPERTY ('PRODUCTVERSION')), 4)) >= 14
+OR ((PARSENAME(CONVERT(VARCHAR(128), SERVERPROPERTY ('PRODUCTVERSION')), 4)) = 13
+	AND PARSENAME(CONVERT(VARCHAR(128), SERVERPROPERTY ('PRODUCTVERSION')), 2) >= 5026)
 
 BEGIN
 
-RAISERROR(N'Beginning 2017 specfic checks', 0, 1) WITH NOWAIT;
+RAISERROR(N'Beginning 2017 and 2016 SP2 specfic checks', 0, 1) WITH NOWAIT;
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR('Gathering stats information', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 INSERT #stats_agg WITH (TABLOCK)
@@ -2915,8 +2999,12 @@ FROM #working_warnings AS b
 JOIN stale_stats os
 ON b.sql_handle = os.sql_handle
 OPTION (RECOMPILE);
+END;
 
 
+IF (PARSENAME(CONVERT(VARCHAR(128), SERVERPROPERTY ('PRODUCTVERSION')), 4)) >= 14
+	AND @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for Adaptive Joins', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 aj AS (
@@ -2931,7 +3019,11 @@ FROM #working_warnings AS b
 JOIN aj
 ON b.sql_handle = aj.sql_handle
 OPTION (RECOMPILE);
+END; 
 
+
+IF @ExpertMode > 0
+BEGIN;
 RAISERROR(N'Checking for Row Goals', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 row_goals AS(
@@ -2945,7 +3037,7 @@ FROM #working_warnings b
 JOIN row_goals
 ON b.query_hash = row_goals.query_hash
 OPTION (RECOMPILE);
-
+END;
 
 END; 
 
@@ -2954,7 +3046,7 @@ RAISERROR(N'Performing query level checks', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE  b
 SET     b.missing_index_count = query_plan.value('count(//p:QueryPlan/p:MissingIndexes/p:MissingIndexGroup)', 'int') ,
-		b.unmatched_index_count = query_plan.value('count(//p:QueryPlan/p:UnmatchedIndexes/p:Parameterization/p:Object)', 'int') 
+		b.unmatched_index_count = CASE WHEN is_trivial <> 1 THEN query_plan.value('count(//p:QueryPlan/p:UnmatchedIndexes/p:Parameterization/p:Object)', 'int') END
 FROM    #query_plan qp
 JOIN #working_warnings AS b
 ON b.query_hash = qp.query_hash
@@ -2997,6 +3089,7 @@ JOIN #trace_flags tf
 ON tf.sql_handle = b.sql_handle 
 OPTION (RECOMPILE);
 
+
 RAISERROR(N'Checking for MSTVFs', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -3007,6 +3100,8 @@ ON b.sql_handle = r.sql_handle
 WHERE  r.relop.exist('/p:RelOp[(@EstimateRows="100" or @EstimateRows="1") and @LogicalOp="Table-valued function"]') = 1
 OPTION (RECOMPILE);
 
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Checking for many to many merge joins', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
 UPDATE b
@@ -3016,7 +3111,11 @@ JOIN #working_warnings AS b
 ON b.sql_handle = r.sql_handle
 WHERE  r.relop.exist('/p:RelOp/p:Merge/@ManyToMany[.="1"]') = 1
 OPTION (RECOMPILE);
+END;
 
+
+IF @ExpertMode > 0
+BEGIN
 RAISERROR(N'Is Paul White Electric?', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p),
 is_paul_white_electric AS (
@@ -3032,6 +3131,9 @@ FROM   #working_warnings AS b
 JOIN is_paul_white_electric ipwe 
 ON ipwe.sql_handle = b.sql_handle 
 OPTION (RECOMPILE);
+END;
+
+
 
 RAISERROR(N'Checking for non-sargable predicates', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
@@ -3071,11 +3173,6 @@ JOIN    #working_warnings AS b
     ON b.query_hash = d.query_hash
 OPTION ( RECOMPILE );
 
-IF EXISTS (   SELECT 1
-              FROM   #working_warnings AS ww
-              WHERE  ww.implicit_conversions = 1
-                     OR ww.proc_or_function_name <> N'Statement' )
-    BEGIN
 
         RAISERROR(N'Getting information about implicit conversions and stored proc parameters', 0, 1) WITH NOWAIT;
 
@@ -3209,14 +3306,43 @@ IF EXISTS (   SELECT 1
 		FROM   #stored_proc_info AS s
 		OPTION (RECOMPILE);
 
+		
+		RAISERROR(N'Updating SET options', 0, 1) WITH NOWAIT;
+		WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+		UPDATE s
+		SET set_options = set_options.ansi_set_options
+		FROM #stored_proc_info AS s
+		JOIN (
+				SELECT  x.sql_handle,
+						N'SET ANSI_NULLS = ' + CASE WHEN [ANSI_NULLS] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+						N'SET ANSI_PADDING = ' + CASE WHEN [ANSI_PADDING] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+						N'SET ANSI_WARNINGS = ' + CASE WHEN [ANSI_WARNINGS] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+						N'SET ARITHABORT = ' + CASE WHEN [ARITHABORT] = 'true' THEN N'ON ' ELSE N' OFF ' END + NCHAR(10) +
+						N'SET CONCAT_NULL_YIELDS_NULL = ' + CASE WHEN [CONCAT_NULL_YIELDS_NULL] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+						N'SET NUMERIC_ROUNDABORT = ' + CASE WHEN [NUMERIC_ROUNDABORT] = 'true' THEN N'ON ' ELSE N'OFF ' END + NCHAR(10) +
+						N'SET QUOTED_IDENTIFIER = ' + CASE WHEN [QUOTED_IDENTIFIER] = 'true' THEN N'ON ' ELSE N'OFF ' + NCHAR(10) END AS [ansi_set_options]
+				FROM (
+					SELECT
+						s.sql_handle,
+						so.o.value('@ANSI_NULLS', 'NVARCHAR(20)') AS [ANSI_NULLS],
+						so.o.value('@ANSI_PADDING', 'NVARCHAR(20)') AS [ANSI_PADDING],
+						so.o.value('@ANSI_WARNINGS', 'NVARCHAR(20)') AS [ANSI_WARNINGS],
+						so.o.value('@ARITHABORT', 'NVARCHAR(20)') AS [ARITHABORT],
+						so.o.value('@CONCAT_NULL_YIELDS_NULL', 'NVARCHAR(20)') AS [CONCAT_NULL_YIELDS_NULL],
+						so.o.value('@NUMERIC_ROUNDABORT', 'NVARCHAR(20)') AS [NUMERIC_ROUNDABORT],
+						so.o.value('@QUOTED_IDENTIFIER', 'NVARCHAR(20)') AS [QUOTED_IDENTIFIER]
+					FROM #statements AS s
+					CROSS APPLY s.statement.nodes('//p:StatementSetOptions') AS so(o)
+				   ) AS x
+		) AS set_options ON set_options.sql_handle = s.sql_handle
+		OPTION(RECOMPILE);
+
+
 		RAISERROR(N'Updating conversion XML', 0, 1) WITH NOWAIT;
 		WITH precheck AS (
 		SELECT spi.sql_handle,
 			   spi.proc_name,
-					CONVERT(XML, 
-					N'<ClickMe><![CDATA['
-					+ @cr + @lf
-					+ CASE WHEN spi.proc_name <> 'Statement' 
+					(SELECT CASE WHEN spi.proc_name <> 'Statement' 
 						   THEN N'The stored procedure ' + spi.proc_name 
 						   ELSE N'This ad hoc statement' 
 					  END
@@ -3268,9 +3394,8 @@ IF EXISTS (   SELECT 1
 						FROM #stored_proc_info AS spi2
 						WHERE spi.sql_handle = spi2.sql_handle
 						FOR XML PATH(N''), TYPE).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 1, N'')
-					+ CHAR(10)
-					+ N']]></ClickMe>'
-					) AS implicit_conversion_info
+					AS [processing-instruction(ClickMe)] FOR XML PATH(''), TYPE )
+					AS implicit_conversion_info
 		FROM #stored_proc_info AS spi
 		GROUP BY spi.sql_handle, spi.proc_name
 		)
@@ -3281,12 +3406,12 @@ IF EXISTS (   SELECT 1
         ON pk.sql_handle = b.sql_handle
         OPTION (RECOMPILE);
 
-		RAISERROR(N'Updating cached parameter XML', 0, 1) WITH NOWAIT;
+		RAISERROR(N'Updating cached parameter XML for procs', 0, 1) WITH NOWAIT;
 		WITH precheck AS (
 		SELECT spi.sql_handle,
 			   spi.proc_name,
-		CONVERT(XML, 
-					N'<ClickMe><![CDATA['
+			   (SELECT set_options
+					+ @cr + @lf
 					+ @cr + @lf
 					+ N'EXEC ' 
 					+ spi.proc_name 
@@ -3307,31 +3432,73 @@ IF EXISTS (   SELECT 1
 						WHERE spi.sql_handle = spi2.sql_handle
 						AND spi2.proc_name <> N'Statement'
 						FOR XML PATH(N''), TYPE).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 1, N'')
-					+ @cr + @lf
-					+ N']]></ClickMe>'
-					) AS cached_execution_parameters
+					AS [processing-instruction(ClickMe)] FOR XML PATH(''), TYPE )
+					AS cached_execution_parameters
 		FROM #stored_proc_info AS spi
-		GROUP BY spi.sql_handle, spi.proc_name
+		GROUP BY spi.sql_handle, spi.proc_name, set_options
 		) 
 		UPDATE b
 		SET b.cached_execution_parameters = pk.cached_execution_parameters
         FROM   #working_warnings AS b
         JOIN   precheck AS pk
         ON pk.sql_handle = b.sql_handle
+		WHERE b.proc_or_function_name <> N'Statement'
         OPTION (RECOMPILE);
 
 
-    END; --End implicit conversion information gathering
+	RAISERROR(N'Updating cached parameter XML for statements', 0, 1) WITH NOWAIT;
+	WITH precheck AS (
+	SELECT spi.sql_handle,
+			   spi.proc_name,
+		   (SELECT 
+				set_options
+				+ @cr + @lf
+				+ @cr + @lf
+				+ N' See QueryText column for full query text'
+				+ @cr + @lf
+				+ @cr + @lf
+				+ STUFF((
+					SELECT DISTINCT N', ' 
+							+ CASE WHEN spi2.variable_name <> N'**no_variable**' AND spi2.compile_time_value <> N'**idk_man**'
+									THEN spi2.variable_name + N' = '
+									ELSE + @cr + @lf + N' We could not find any cached parameter values for this stored proc. ' 
+							  END
+							+ CASE WHEN spi2.variable_name = N'**no_variable**' OR spi2.compile_time_value = N'**idk_man**'
+								   THEN + @cr + @lf + N' Possible reasons include declared variables inside the procedure, recompile hints, etc. '
+								   WHEN spi2.compile_time_value = N'NULL' 
+								   THEN spi2.compile_time_value 
+								   ELSE RTRIM(spi2.compile_time_value)
+							  END
+					FROM #stored_proc_info AS spi2
+					WHERE spi.sql_handle = spi2.sql_handle
+					AND spi2.proc_name = N'Statement'
+					AND spi2.variable_name NOT LIKE N'%msparam%'
+					FOR XML PATH(N''), TYPE).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 1, N'')
+				AS [processing-instruction(ClickMe)] FOR XML PATH(''), TYPE )
+				AS cached_execution_parameters
+	FROM #stored_proc_info AS spi
+	GROUP BY spi.sql_handle, spi.proc_name, spi.set_options
+	) 
+	UPDATE b
+	SET b.cached_execution_parameters = pk.cached_execution_parameters
+    FROM   #working_warnings AS b
+    JOIN   precheck AS pk
+    ON pk.sql_handle = b.sql_handle
+	WHERE b.proc_or_function_name = N'Statement'
+    OPTION (RECOMPILE);
 
 
+RAISERROR(N'Filling in implicit conversion info', 0, 1) WITH NOWAIT;
 UPDATE b
-SET    b.implicit_conversion_info = CASE WHEN b.implicit_conversion_info IS NULL THEN 
-											N'<?NoNeedToClickMe -- N/A --?>'
-                                         ELSE b.implicit_conversion_info
+SET    b.implicit_conversion_info = CASE WHEN b.implicit_conversion_info IS NULL 
+									OR CONVERT(NVARCHAR(4000), b.implicit_conversion_info) = N''
+									THEN N'<?NoNeedToClickMe -- N/A --?>'
+                                    ELSE b.implicit_conversion_info
                                     END,
-       b.cached_execution_parameters = CASE WHEN b.cached_execution_parameters IS NULL THEN
-                                                N'<?NoNeedToClickMe -- N/A --?>'
-                                            ELSE b.cached_execution_parameters
+       b.cached_execution_parameters = CASE WHEN b.cached_execution_parameters IS NULL 
+									   OR CONVERT(NVARCHAR(4000), b.cached_execution_parameters) = N''
+									   THEN N'<?NoNeedToClickMe -- N/A --?>'
+                                       ELSE b.cached_execution_parameters
                                        END
 FROM   #working_warnings AS b
 OPTION (RECOMPILE);
@@ -3458,7 +3625,7 @@ IF EXISTS
 		OPTION (RECOMPILE);
 
 	
-	END
+	END;
 
 	RAISERROR(N'Filling in missing index blanks', 0, 1) WITH NOWAIT;
 	UPDATE ww
@@ -3486,8 +3653,8 @@ SET    b.frequent_execution = CASE WHEN wm.xpm > @execution_threshold THEN 1 END
 	   b.is_sort_expensive = CASE WHEN b.query_cost >= (@ctp / 2) AND b.sort_cost >= b.query_cost * .5 THEN 1 END,
 	   b.is_remote_query_expensive = CASE WHEN b.remote_query_cost >= b.query_cost * .05 THEN 1 END,
 	   b.is_unused_grant = CASE WHEN percent_memory_grant_used <= @memory_grant_warning_percent AND min_grant_kb > @min_memory_per_query THEN 1 END,
-	   b.long_running_low_cpu = CASE WHEN wm.avg_duration > wm.avg_cpu_time * 4 THEN 1 END,
-	   b.low_cost_high_cpu = CASE WHEN b.query_cost < @ctp AND wm.avg_cpu_time > 500. AND b.query_cost * 10 < wm.avg_cpu_time THEN 1 END,
+	   b.long_running_low_cpu = CASE WHEN wm.avg_duration > wm.avg_cpu_time * 4 AND avg_cpu_time < 500. THEN 1 END,
+	   b.low_cost_high_cpu = CASE WHEN b.query_cost < 10 AND wm.avg_cpu_time > 5000. THEN 1 END,
 	   b.is_spool_expensive = CASE WHEN b.query_cost > (@ctp / 2) AND b.index_spool_cost >= b.query_cost * .1 THEN 1 END,
 	   b.is_spool_more_rows = CASE WHEN b.index_spool_rows >= wm.min_rowcount THEN 1 END,
 	   b.is_bad_estimate = CASE WHEN wm.avg_rowcount > 0 AND (b.estimated_rows * 1000 < wm.avg_rowcount OR b.estimated_rows > wm.avg_rowcount * 1000) THEN 1 END,
@@ -3518,7 +3685,8 @@ SET    b.warnings = SUBSTRING(
                   CASE WHEN b.is_cursor = 1 THEN ', Cursor' 
 							+ CASE WHEN b.is_optimistic_cursor = 1 THEN '; optimistic' ELSE '' END
 							+ CASE WHEN b.is_forward_only_cursor = 0 THEN '; not forward only' ELSE '' END
-							+ CASE WHEN b.is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END			
+							+ CASE WHEN b.is_cursor_dynamic = 1 THEN '; dynamic' ELSE '' END
+                            + CASE WHEN b.is_fast_forward_cursor = 1 THEN '; fast forward' ELSE '' END			
 				  ELSE '' END +
                   CASE WHEN b.is_parallel = 1 THEN ', Parallel' ELSE '' END +
                   CASE WHEN b.near_parallel = 1 THEN ', Nearly Parallel' ELSE '' END +
@@ -3602,6 +3770,8 @@ RAISERROR(N'Checking for parameter sniffing symptoms', 0, 1) WITH NOWAIT;
 
 UPDATE b
 SET b.parameter_sniffing_symptoms = 
+CASE WHEN b.count_executions < 4 THEN 'Too few executions to compare (< 4).'
+	ELSE													
 	SUBSTRING(  
 				/*Duration*/
 				CASE WHEN (b.min_duration * 100) < (b.avg_duration) THEN ', Fast sometimes' ELSE '' END +
@@ -3654,6 +3824,7 @@ SET b.parameter_sniffing_symptoms =
 				CASE WHEN b.last_log_bytes_used * 100 < b.avg_log_bytes_used  THEN ', Low log use run' ELSE '' END +
 				CASE WHEN b.last_log_bytes_used > b.avg_log_bytes_used * 100 THEN ', High log use last run' ELSE '' END 
 	, 2, 200000) 
+	END
 FROM #working_metrics AS b
 OPTION (RECOMPILE);
 
@@ -3926,6 +4097,19 @@ BEGIN
                     'http://brentozar.com/blitzcache/cursors-found-slow-queries/',
                     'Dynamic Cursors inhibit parallelism!.');
 
+		IF EXISTS (SELECT 1/0
+                   FROM   #working_warnings
+                   WHERE  is_cursor = 1
+				   AND is_fast_forward_cursor = 1
+                    )
+            INSERT INTO #warning_results (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+            VALUES (4,
+                    200,
+                    'Cursors',
+                    'Fast Forward Cursors',
+                    'http://brentozar.com/blitzcache/cursors-found-slow-queries/',
+                    'Fast forward cursors inhibit parallelism!.');
+					
         IF EXISTS (SELECT 1/0
                    FROM   #working_warnings
                    WHERE  is_forced_parameterized = 1
@@ -4031,6 +4215,32 @@ BEGIN
                     'Implicit Conversions',
                     'http://brentozar.com/go/implicit',
                     'One or more queries are comparing two fields that are not of the same data type.') ;
+
+        IF EXISTS (SELECT 1/0
+                   FROM   #working_warnings p
+                   WHERE  busy_loops = 1
+				   )
+        INSERT INTO #warning_results (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+        VALUES (
+                16,
+                100,
+                'Performance',
+                'Busy Loops',
+                'http://brentozar.com/blitzcache/busy-loops/',
+                'Operations have been found that are executed 100 times more often than the number of rows returned by each iteration. This is an indicator that something is off in query execution.');
+
+        IF EXISTS (SELECT 1/0
+                   FROM   #working_warnings p
+                   WHERE  tvf_join = 1
+				   )
+        INSERT INTO #warning_results (CheckID, Priority, FindingsGroup, Finding, URL, Details)
+        VALUES (
+                17,
+                50,
+                'Performance',
+                'Joining to table valued functions',
+                'http://brentozar.com/blitzcache/tvf-join/',
+                'Execution plans have been found that join to table valued functions (TVFs). TVFs produce inaccurate estimates of the number of rows returned and can lead to any number of query plan problems.');
 
         IF EXISTS (SELECT 1/0
                    FROM   #working_warnings
@@ -4575,7 +4785,7 @@ BEGIN
                      100,
                      'Many to Many Merge',
                      'These use secret worktables that could be doing lots of reads',
-                     'link to blog post when published',
+                     'https://www.brentozar.com/archive/2018/04/many-mysteries-merge-joins/',
 					 'Occurs when join inputs aren''t known to be unique. Can be really bad when parallel.');
 
         IF EXISTS (SELECT 1/0
@@ -4587,7 +4797,7 @@ BEGIN
                      50,
                      'Non-SARGable queries',
                      'Queries may be using',
-                     'link to blog post when published',
+                     'http://brentozar.com/go/sargable',
 					 'Occurs when join inputs aren''t known to be unique. Can be really bad when parallel.');
 					
         IF EXISTS (SELECT 1/0
@@ -4788,7 +4998,7 @@ BEGIN
             URL,
             Details,
             CheckID
-    ORDER BY Priority ASC, CheckID ASC
+    ORDER BY Priority ASC, FindingsGroup, Finding, CheckID ASC
     OPTION (RECOMPILE);
 
 
