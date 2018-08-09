@@ -2,7 +2,7 @@
 	.SYNOPSIS
 		Set-ISsisCatalogLogRetentionPeriod
 	.DESCRIPTION
-		Set Integration Services catalog operations log retention period in days
+		Set Analysis Services catalog operations log retention period in days
 	.PARAMETER serverInstance
 		SQL Server 2012 Instance
 	.PARAMETER retentionPeriod

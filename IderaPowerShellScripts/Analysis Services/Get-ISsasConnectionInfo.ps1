@@ -2,7 +2,7 @@
 	.SYNOPSIS
 		Get-ISsasConnectionInfo
 	.DESCRIPTION
-		Connect to Analysis Server and discover connection information
+		Connect to Anaylsis Server and discover connection information
 	.PARAMETER serverInstance
 		SQL Server instance
 	.EXAMPLE

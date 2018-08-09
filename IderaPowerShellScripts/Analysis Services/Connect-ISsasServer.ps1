@@ -2,7 +2,7 @@
 	.SYNOPSIS
 		Connect-ISsasServer
 	.DESCRIPTION
-		Connect to Analysis Server
+		Connect to Anaylsis Server
 	.PARAMETER serverInstance
 		SQL Server instance
 	.EXAMPLE

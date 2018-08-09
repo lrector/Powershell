@@ -2,7 +2,7 @@
 	.SYNOPSIS
 		Remove-ISsasOldBackups
 	.DESCRIPTION
-		Remove old backups and retain a specified number of backed up Analysis Server databases
+		Backup all Analysis Server databases
 	.PARAMETER serverInstance
 		SQL Server instance
 	.PARAMETER backupDestination

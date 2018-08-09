@@ -2,7 +2,7 @@
 	.SYNOPSIS
 		Invoke-ISqlDatabasePolicy
 	.DESCRIPTION
-		Invokes a SQL Server Policy
+		Retrieve Analysis Services databases
 	.PARAMETER serverInstance
 		SQL Server 2012 Instance
 	.PARAMETER databaseName

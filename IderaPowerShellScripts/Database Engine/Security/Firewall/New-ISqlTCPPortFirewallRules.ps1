@@ -2,7 +2,7 @@
 	.SYNOPSIS
 		New-ISqlTCPPortFirewallRules
 	.DESCRIPTION
-		Create a new TCP inbound and outbound firewall rule for same port
+		Create a new TCP inbound and inbound firewall rule for same port
 	.PARAMETER dn
 		Rule display name
 	.EXAMPLE 

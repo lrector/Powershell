@@ -2,7 +2,7 @@
 	.SYNOPSIS
 		Start-ISqlCheckDB
 	.DESCRIPTION
-		Run a DBCC CHECKDB against specified server instance and database
+		Run a DBCC against specified server instance and database
 	.PARAMETER serverInstance
 		SQL Server instance
 	.PARAMETER dbName
@@ -21,7 +21,7 @@ param (
 )
 
 process {
-	Write-Verbose "Run a DBCC CHECKDB against specified server instance and database..." 
+	Write-Verbose "Run a DBCC against specified server instance and database..." 
 
 	try {
 		$connStr = "Data Source=$serverInstance;Integrated Security=SSPI;Initial Catalog=$dbName"

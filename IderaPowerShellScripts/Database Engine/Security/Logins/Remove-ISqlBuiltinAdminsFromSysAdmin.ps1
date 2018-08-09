@@ -2,7 +2,7 @@
 	.SYNOPSIS
 		Remove-ISqlBuiltinAdminsFromSysAdmin
 	.DESCRIPTION
-		Remove BUILTIN\Administrators from sysadmin role
+		Remove Login from a Database Role in all Databases excluding System DBs
 	.PARAMETER serverInstance
 		SQL Server instance
 	.EXAMPLE

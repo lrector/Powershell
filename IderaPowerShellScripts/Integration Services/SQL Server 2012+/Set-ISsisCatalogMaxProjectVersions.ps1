@@ -2,7 +2,7 @@
 	.SYNOPSIS
 		Set-ISsisCatalogMaxProjectVersions
 	.DESCRIPTION
-		Set Integration Services catalog maximum number of version per project
+		Set Analysis Services catalog maximum number of version per project
 	.PARAMETER serverInstance
 		SQL Server 2012 Instance
 	.PARAMETER maxProjectVersions
