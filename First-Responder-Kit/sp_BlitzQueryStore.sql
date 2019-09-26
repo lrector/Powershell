@@ -46,7 +46,9 @@ ALTER PROCEDURE dbo.sp_BlitzQueryStore
 	@SkipXML BIT = 0,
 	@Debug BIT = 0,
 	@ExpertMode BIT = 0,
-	@VersionDate DATETIME = NULL OUTPUT
+	@Version     VARCHAR(30) = NULL OUTPUT,
+	@VersionDate DATETIME = NULL OUTPUT,
+    @VersionCheckMode BIT = 0
 WITH RECOMPILE
 AS
 BEGIN /*First BEGIN*/
@@ -54,9 +56,12 @@ BEGIN /*First BEGIN*/
 SET NOCOUNT ON;
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
-DECLARE @Version NVARCHAR(30);
-	SET @Version = '2.7';
-	SET @VersionDate = '20180701';
+SELECT @Version = '3.8', @VersionDate = '20190922';
+IF(@VersionCheckMode = 1)
+BEGIN
+	RETURN;
+END;
+
 
 DECLARE /*Variables for the variable Gods*/
 		@msg NVARCHAR(MAX) = N'', --Used to format RAISERROR messages in some places
@@ -92,18 +97,21 @@ FROM   sys.configurations AS c
 WHERE  c.name = N'min memory per query (KB)'
 OPTION (RECOMPILE);
 
-/*Grabs log size for datbase*/
-SELECT @log_size_mb = AVG(((mf.size * 8) / 1024.))
-FROM sys.master_files AS mf
-WHERE mf.database_id = DB_ID(@DatabaseName)
-AND mf.type_desc = 'LOG';
-
-/*Grab avg tempdb file size*/
-SELECT @avg_tempdb_data_file = AVG(((mf.size * 8) / 1024.))
-FROM sys.master_files AS mf
-WHERE mf.database_id = DB_ID('tempdb')
-AND mf.type_desc = 'ROWS';
-
+/*Check if this is Azure first*/
+IF (SELECT SERVERPROPERTY ('EDITION')) <> 'SQL Azure'
+    BEGIN 
+        /*Grabs log size for datbase*/
+        SELECT @log_size_mb = AVG(((mf.size * 8) / 1024.))
+        FROM sys.master_files AS mf
+        WHERE mf.database_id = DB_ID(@DatabaseName)
+        AND mf.type_desc = 'LOG';
+        
+        /*Grab avg tempdb file size*/
+        SELECT @avg_tempdb_data_file = AVG(((mf.size * 8) / 1024.))
+        FROM sys.master_files AS mf
+        WHERE mf.database_id = DB_ID('tempdb')
+        AND mf.type_desc = 'ROWS';
+    END;
 
 /*Help section*/
 
@@ -131,14 +139,10 @@ IF @Help = 1
 	Unknown limitations of this version:
 	 - Could be tickling
 	
-	Changes - for the full list of improvements and fixes in this version, see:
-	https://github.com/BrentOzarULTD/SQL-Server-First-Responder-Kit/
-	
-	
 	
 	MIT License
 	
-	Copyright (c) 2016 Brent Ozar Unlimited
+	Copyright (c) 2019 Brent Ozar Unlimited
 	
 	Permission is hereby granted, free of charge, to any person obtaining a copy
 	of this software and associated documentation files (the "Software"), to deal
@@ -227,7 +231,7 @@ BEGIN
 
 	/*Is it online?*/
 	RAISERROR('Making sure [%s] is online', 0, 1, @DatabaseName) WITH NOWAIT;
-	IF (DATABASEPROPERTYEX(@DatabaseName, 'Status')) <> 'ONLINE'
+	IF (DATABASEPROPERTYEX(@DatabaseName, 'Collation')) IS NULL
 	BEGIN
 		RAISERROR('The @DatabaseName you specified ([%s]) is not readable. Please check the name and try again. Better yet, check your server.', 0, 1, @DatabaseName);
 		RETURN;
@@ -354,6 +358,14 @@ CREATE TABLE #grouped_interval
     total_count_executions BIGINT NULL,
 	total_avg_log_bytes_mb DECIMAL(38, 2) NULL,
 	total_avg_tempdb_space DECIMAL(38, 2) NULL,
+    total_max_duration_ms DECIMAL(38, 2) NULL,
+    total_max_cpu_time_ms DECIMAL(38, 2) NULL,
+    total_max_logical_io_reads_mb DECIMAL(38, 2) NULL,
+    total_max_physical_io_reads_mb DECIMAL(38, 2) NULL,
+    total_max_logical_io_writes_mb DECIMAL(38, 2) NULL,
+    total_max_query_max_used_memory_mb DECIMAL(38, 2) NULL,
+	total_max_log_bytes_mb DECIMAL(38, 2) NULL,
+	total_max_tempdb_space DECIMAL(38, 2) NULL,
 	INDEX gi_ix_dates CLUSTERED (start_range, end_range)
 );
 
@@ -382,6 +394,7 @@ CREATE TABLE #working_metrics
     database_name NVARCHAR(258),
 	plan_id BIGINT,
     query_id BIGINT,
+    query_id_all_plan_ids VARCHAR(8000),
 	/*these columns are from query_store_query*/
 	proc_or_function_name NVARCHAR(258),
 	batch_sql_handle VARBINARY(64),
@@ -474,6 +487,7 @@ CREATE TABLE #working_metrics
 	total_log_bytes_used AS avg_log_bytes_used * count_executions,
 	total_tempdb_space_used AS avg_tempdb_space_used * count_executions,
 	xpm AS NULLIF(count_executions, 0) / NULLIF(DATEDIFF(MINUTE, first_execution_time, last_execution_time), 0),
+    percent_memory_grant_used AS CONVERT(MONEY, ISNULL(NULLIF(( max_query_max_used_memory * 1.00 ), 0) / NULLIF(min_query_max_used_memory, 0), 0) * 100.),
 	INDEX wm_ix_ids CLUSTERED (plan_id, query_id, query_hash)
 );
 
@@ -507,9 +521,6 @@ CREATE TABLE #working_plan_text
 	last_execution_time DATETIME2,
 	avg_compile_duration DECIMAL(38,2),
 	last_compile_duration BIGINT,
-	min_grant_kb DECIMAL(38,2), --This column is updated from dm_exec_query_stats when sql_handle for query exists there
-	max_used_grant_kb DECIMAL(38,2), --This column is updated from dm_exec_query_stats when sql_handle for query exists there
-	percent_memory_grant_used AS CONVERT(MONEY, ISNULL(NULLIF(( max_used_grant_kb * 1.00 ), 0) / NULLIF(min_grant_kb, 0), 0) * 100.),
 	/*These are from query_store_query*/
 	query_sql_text NVARCHAR(MAX),
 	statement_sql_handle VARBINARY(64),
@@ -683,6 +694,7 @@ CREATE TABLE #statements
 	query_hash BINARY(8),
 	sql_handle VARBINARY(64),
 	statement XML,
+    is_cursor BIT
 	INDEX s_ix_ids CLUSTERED (plan_id, query_id, query_hash, sql_handle)
 );
 
@@ -740,7 +752,7 @@ CREATE TABLE #stats_agg
 (
     sql_handle VARBINARY(64),
     last_update DATETIME2,
-    modification_count DECIMAL(38, 2),
+    modification_count BIGINT,
     sampling_percent DECIMAL(38, 2),
     [statistics] NVARCHAR(258),
     [table] NVARCHAR(258),
@@ -836,7 +848,8 @@ CREATE TABLE #missing_index_xml
     query_hash BINARY(8),
     sql_handle VARBINARY(64),
     impact FLOAT,
-    index_xml XML
+    index_xml XML,
+	INDEX mix_ix_ids CLUSTERED (sql_handle, query_hash)
 );
 
 DROP TABLE IF EXISTS #missing_index_schema;
@@ -849,7 +862,8 @@ CREATE TABLE #missing_index_schema
     database_name NVARCHAR(128),
     schema_name NVARCHAR(128),
     table_name NVARCHAR(128),
-    index_xml XML
+    index_xml XML,
+	INDEX mis_ix_ids CLUSTERED (sql_handle, query_hash)
 );
 
 
@@ -864,7 +878,8 @@ CREATE TABLE #missing_index_usage
     schema_name NVARCHAR(128),
     table_name NVARCHAR(128),
 	usage NVARCHAR(128),
-    index_xml XML
+    index_xml XML,
+	INDEX miu_ix_ids CLUSTERED (sql_handle, query_hash)
 );
 
 DROP TABLE IF EXISTS #missing_index_detail;
@@ -878,7 +893,8 @@ CREATE TABLE #missing_index_detail
     schema_name NVARCHAR(128),
     table_name NVARCHAR(128),
     usage NVARCHAR(128),
-    column_name NVARCHAR(128)
+    column_name NVARCHAR(128),
+	INDEX mid_ix_ids CLUSTERED (sql_handle, query_hash)
 );
 
 
@@ -895,9 +911,14 @@ CREATE TABLE #missing_index_pretty
 	equality NVARCHAR(MAX),
 	inequality NVARCHAR(MAX),
 	[include] NVARCHAR(MAX),
+	is_spool BIT,
 	details AS N'/* '
 	           + CHAR(10) 
-			   + N'The Query Processor estimates that implementing the following index could improve the query cost by ' 
+			   + CASE is_spool 
+			          WHEN 0 
+					  THEN N'The Query Processor estimates that implementing the '
+					  ELSE N'We estimate that implementing the '
+				 END  
 			   + CONVERT(NVARCHAR(30), impact)
 			   + '%.'
 			   + CHAR(10)
@@ -913,7 +934,7 @@ CREATE TABLE #missing_index_pretty
 			   + N'CREATE NONCLUSTERED INDEX ix_'
 			   + ISNULL(REPLACE(REPLACE(REPLACE(equality,'[', ''), ']', ''),   ', ', '_'), '')
 			   + ISNULL(REPLACE(REPLACE(REPLACE(inequality,'[', ''), ']', ''), ', ', '_'), '')
-			   + CASE WHEN [include] IS NOT NULL THEN + N'Includes' ELSE N'' END
+			   + CASE WHEN [include] IS NOT NULL THEN + N'_Includes' ELSE N'' END
 			   + CHAR(10)
 			   + N' ON '
 			   + schema_name
@@ -937,8 +958,26 @@ CREATE TABLE #missing_index_pretty
 			   + CHAR(10)
 			   + N'GO'
 			   + CHAR(10)
-			   + N'*/'
+			   + N'*/',
+	INDEX mip_ix_ids CLUSTERED (sql_handle, query_hash)
 );
+
+DROP TABLE IF EXISTS #index_spool_ugly;
+
+CREATE TABLE #index_spool_ugly
+(
+    query_hash BINARY(8),
+    sql_handle VARBINARY(64),
+    impact FLOAT,
+    database_name NVARCHAR(128),
+    schema_name NVARCHAR(128),
+    table_name NVARCHAR(128),
+	equality NVARCHAR(MAX),
+	inequality NVARCHAR(MAX),
+	[include] NVARCHAR(MAX),
+	INDEX isu_ix_ids CLUSTERED (sql_handle, query_hash)
+);
+
 
 /*Sets up WHERE clause that gets used quite a bit*/
 
@@ -1125,21 +1164,31 @@ SELECT   CONVERT(DATE, qsrs.last_execution_time) AS flat_date,
          SUM((qsrs.avg_logical_io_reads * 8 ) / 1024.) / SUM(qsrs.count_executions) AS total_avg_logical_io_reads_mb,
          SUM((qsrs.avg_physical_io_reads* 8 ) / 1024.) / SUM(qsrs.count_executions) AS total_avg_physical_io_reads_mb,
          SUM((qsrs.avg_logical_io_writes* 8 ) / 1024.) / SUM(qsrs.count_executions) AS total_avg_logical_io_writes_mb,
-         SUM(( qsrs.avg_query_max_used_memory * 8 ) / 1024.) / SUM(qsrs.count_executions) AS total_avg_query_max_used_memory_mb,
+         SUM((qsrs.avg_query_max_used_memory * 8 ) / 1024.) / SUM(qsrs.count_executions) AS total_avg_query_max_used_memory_mb,
          SUM(qsrs.avg_rowcount) AS total_rowcount,
-         SUM(qsrs.count_executions) AS total_count_executions';
+         SUM(qsrs.count_executions) AS total_count_executions,
+         SUM(qsrs.max_duration / 1000.) AS total_max_duration_ms,
+         SUM(qsrs.max_cpu_time / 1000.) AS total_max_cpu_time_ms,
+         SUM((qsrs.max_logical_io_reads * 8 ) / 1024.) AS total_max_logical_io_reads_mb,
+         SUM((qsrs.max_physical_io_reads* 8 ) / 1024.) AS total_max_physical_io_reads_mb,
+         SUM((qsrs.max_logical_io_writes* 8 ) / 1024.) AS total_max_logical_io_writes_mb,
+         SUM((qsrs.max_query_max_used_memory * 8 ) / 1024.)  AS total_max_query_max_used_memory_mb         ';
 		 IF @new_columns = 1
 			BEGIN
 				SET @sql_select += N',
 									 SUM((qsrs.avg_log_bytes_used) / 1048576.) / SUM(qsrs.count_executions) AS total_avg_log_bytes_mb,
-									 SUM(avg_tempdb_space_used) /  SUM(qsrs.count_executions) AS total_avg_tempdb_space 
+									 SUM(qsrs.avg_tempdb_space_used) /  SUM(qsrs.count_executions) AS total_avg_tempdb_space,
+                                     SUM((qsrs.max_log_bytes_used) / 1048576.) AS total_max_log_bytes_mb,
+		                             SUM(qsrs.max_tempdb_space_used) AS total_max_tempdb_space
 									 ';
 			END;
 		IF @new_columns = 0
 			BEGIN
 				SET @sql_select += N',
 									NULL AS total_avg_log_bytes_mb, 
-									NULL AS total_avg_tempdb_space
+									NULL AS total_avg_tempdb_space,
+                                    NULL AS total_max_log_bytes_mb,
+                                    NULL AS total_max_tempdb_space
 									';
 			END;
 
@@ -1175,7 +1224,9 @@ INSERT #grouped_interval WITH (TABLOCK)
 		( flat_date, start_range, end_range, total_avg_duration_ms, 
 		  total_avg_cpu_time_ms, total_avg_logical_io_reads_mb, total_avg_physical_io_reads_mb, 
 		  total_avg_logical_io_writes_mb, total_avg_query_max_used_memory_mb, total_rowcount, 
-		  total_count_executions, total_avg_log_bytes_mb, total_avg_tempdb_space )
+		  total_count_executions, total_max_duration_ms, total_max_cpu_time_ms, total_max_logical_io_reads_mb,
+          total_max_physical_io_reads_mb, total_max_logical_io_writes_mb, total_max_query_max_used_memory_mb,
+          total_avg_log_bytes_mb, total_avg_tempdb_space, total_max_log_bytes_mb, total_max_tempdb_space )                      
 
 EXEC sys.sp_executesql  @stmt = @sql_select, 
 						@params = @sp_params,
@@ -1207,7 +1258,7 @@ AS ( SELECT   TOP 1
 INSERT #working_plans WITH (TABLOCK) 
 		( plan_id, query_id, pattern )
 SELECT   TOP ( @sp_Top ) 
-         qsp.plan_id, qsp.query_id, ''duration''
+         qsp.plan_id, qsp.query_id, ''avg duration''
 FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
 JOIN     duration_max AS dm
 ON qsp.last_execution_time >= dm.start_range
@@ -1243,6 +1294,52 @@ EXEC sys.sp_executesql  @stmt = @sql_select,
 						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
 
 
+SET @sql_select = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;';
+SET @sql_select += N'
+WITH duration_max
+AS ( SELECT   TOP 1 
+              gi.start_range,
+              gi.end_range
+     FROM     #grouped_interval AS gi
+     ORDER BY gi.total_max_duration_ms DESC )
+INSERT #working_plans WITH (TABLOCK) 
+		( plan_id, query_id, pattern )
+SELECT   TOP ( @sp_Top ) 
+         qsp.plan_id, qsp.query_id, ''max duration''
+FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
+JOIN     duration_max AS dm
+ON qsp.last_execution_time >= dm.start_range
+   AND qsp.last_execution_time < dm.end_range
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_runtime_stats AS qsrs
+ON qsrs.plan_id = qsp.plan_id
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query AS qsq
+ON qsq.query_id = qsp.query_id
+JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query_text AS qsqt
+ON qsqt.query_text_id = qsq.query_text_id
+WHERE    1 = 1
+	AND qsq.is_internal_query = 0
+	AND qsp.query_plan IS NOT NULL
+	';
+
+SET @sql_select += @sql_where;
+
+SET @sql_select +=  N'ORDER BY qsrs.max_duration DESC
+					OPTION (RECOMPILE);
+					';
+
+IF @Debug = 1
+	PRINT @sql_select;
+
+IF @sql_select IS NULL
+    BEGIN
+        RAISERROR(N'@sql_select is NULL', 0, 1) WITH NOWAIT;
+        RETURN;
+    END;
+
+EXEC sys.sp_executesql  @stmt = @sql_select, 
+						@params = @sp_params,
+						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
+
 
 /*Get longest cpu plans*/
 
@@ -1259,7 +1356,7 @@ AS ( SELECT   TOP 1
 INSERT #working_plans WITH (TABLOCK) 
 		( plan_id, query_id, pattern )
 SELECT   TOP ( @sp_Top )
-		 qsp.plan_id, qsp.query_id, ''cpu''
+		 qsp.plan_id, qsp.query_id, ''avg cpu''
 FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
 JOIN     cpu_max AS dm
 ON qsp.last_execution_time >= dm.start_range
@@ -1295,6 +1392,52 @@ EXEC sys.sp_executesql  @stmt = @sql_select,
 						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
 
 
+SET @sql_select = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;';
+SET @sql_select += N'
+WITH cpu_max
+AS ( SELECT   TOP 1 
+              gi.start_range,
+              gi.end_range
+     FROM     #grouped_interval AS gi
+     ORDER BY gi.total_max_cpu_time_ms DESC )
+INSERT #working_plans WITH (TABLOCK) 
+		( plan_id, query_id, pattern )
+SELECT   TOP ( @sp_Top )
+		 qsp.plan_id, qsp.query_id, ''max cpu''
+FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
+JOIN     cpu_max AS dm
+ON qsp.last_execution_time >= dm.start_range
+   AND qsp.last_execution_time < dm.end_range
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_runtime_stats AS qsrs
+ON qsrs.plan_id = qsp.plan_id
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query AS qsq
+ON qsq.query_id = qsp.query_id
+JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query_text AS qsqt
+ON qsqt.query_text_id = qsq.query_text_id
+WHERE    1 = 1
+    AND qsq.is_internal_query = 0
+	AND qsp.query_plan IS NOT NULL
+	';
+
+SET @sql_select += @sql_where;
+
+SET @sql_select +=  N'ORDER BY qsrs.max_cpu_time DESC
+					OPTION (RECOMPILE);
+					';
+
+IF @Debug = 1
+	PRINT @sql_select;
+
+IF @sql_select IS NULL
+    BEGIN
+        RAISERROR(N'@sql_select is NULL', 0, 1) WITH NOWAIT;
+        RETURN;
+    END;
+
+EXEC sys.sp_executesql  @stmt = @sql_select, 
+						@params = @sp_params,
+						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
+
 
 /*Get highest logical read plans*/
 
@@ -1311,7 +1454,7 @@ AS ( SELECT   TOP 1
 INSERT #working_plans WITH (TABLOCK) 
 		( plan_id, query_id, pattern )
 SELECT   TOP ( @sp_Top ) 
-		 qsp.plan_id, qsp.query_id, ''logical reads''
+		 qsp.plan_id, qsp.query_id, ''avg logical reads''
 FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
 JOIN     logical_reads_max AS dm
 ON qsp.last_execution_time >= dm.start_range
@@ -1347,6 +1490,52 @@ EXEC sys.sp_executesql  @stmt = @sql_select,
 						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
 
 
+SET @sql_select = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;';
+SET @sql_select += N'
+WITH logical_reads_max
+AS ( SELECT   TOP 1 
+              gi.start_range,
+              gi.end_range
+     FROM     #grouped_interval AS gi
+     ORDER BY gi.total_max_logical_io_reads_mb DESC )
+INSERT #working_plans WITH (TABLOCK) 
+		( plan_id, query_id, pattern )
+SELECT   TOP ( @sp_Top ) 
+		 qsp.plan_id, qsp.query_id, ''max logical reads''
+FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
+JOIN     logical_reads_max AS dm
+ON qsp.last_execution_time >= dm.start_range
+   AND qsp.last_execution_time < dm.end_range
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_runtime_stats AS qsrs
+ON qsrs.plan_id = qsp.plan_id
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query AS qsq
+ON qsq.query_id = qsp.query_id
+JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query_text AS qsqt
+ON qsqt.query_text_id = qsq.query_text_id
+WHERE    1 = 1
+    AND qsq.is_internal_query = 0
+	AND qsp.query_plan IS NOT NULL
+	';
+
+SET @sql_select += @sql_where;
+
+SET @sql_select +=  N'ORDER BY qsrs.max_logical_io_reads DESC
+					OPTION (RECOMPILE);
+					';
+
+IF @Debug = 1
+	PRINT @sql_select;
+
+IF @sql_select IS NULL
+    BEGIN
+        RAISERROR(N'@sql_select is NULL', 0, 1) WITH NOWAIT;
+        RETURN;
+    END;
+
+EXEC sys.sp_executesql  @stmt = @sql_select, 
+						@params = @sp_params,
+						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
+
 
 /*Get highest physical read plans*/
 
@@ -1363,7 +1552,7 @@ AS ( SELECT   TOP 1
 INSERT #working_plans WITH (TABLOCK) 
 		( plan_id, query_id, pattern )
 SELECT   TOP ( @sp_Top ) 
-		 qsp.plan_id, qsp.query_id, ''physical reads''
+		 qsp.plan_id, qsp.query_id, ''avg physical reads''
 FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
 JOIN     physical_read_max AS dm
 ON qsp.last_execution_time >= dm.start_range
@@ -1399,6 +1588,52 @@ EXEC sys.sp_executesql  @stmt = @sql_select,
 						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
 
 
+SET @sql_select = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;';
+SET @sql_select += N'
+WITH physical_read_max
+AS ( SELECT   TOP 1 
+              gi.start_range,
+              gi.end_range
+     FROM     #grouped_interval AS gi
+     ORDER BY gi.total_max_physical_io_reads_mb DESC )
+INSERT #working_plans WITH (TABLOCK) 
+		( plan_id, query_id, pattern )
+SELECT   TOP ( @sp_Top ) 
+		 qsp.plan_id, qsp.query_id, ''max physical reads''
+FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
+JOIN     physical_read_max AS dm
+ON qsp.last_execution_time >= dm.start_range
+   AND qsp.last_execution_time < dm.end_range
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_runtime_stats AS qsrs
+ON qsrs.plan_id = qsp.plan_id
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query AS qsq
+ON qsq.query_id = qsp.query_id
+JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query_text AS qsqt
+ON qsqt.query_text_id = qsq.query_text_id
+WHERE    1 = 1
+    AND qsq.is_internal_query = 0
+	AND qsp.query_plan IS NOT NULL
+	';
+
+SET @sql_select += @sql_where;
+
+SET @sql_select +=  N'ORDER BY qsrs.max_physical_io_reads DESC
+					OPTION (RECOMPILE);
+					';
+
+IF @Debug = 1
+	PRINT @sql_select;
+
+IF @sql_select IS NULL
+    BEGIN
+        RAISERROR(N'@sql_select is NULL', 0, 1) WITH NOWAIT;
+        RETURN;
+    END;
+
+EXEC sys.sp_executesql  @stmt = @sql_select, 
+						@params = @sp_params,
+						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
+
 
 /*Get highest logical write plans*/
 
@@ -1415,7 +1650,7 @@ AS ( SELECT   TOP 1
 INSERT #working_plans WITH (TABLOCK) 
 		( plan_id, query_id, pattern )
 SELECT   TOP ( @sp_Top ) 
-		 qsp.plan_id, qsp.query_id, ''writes''
+		 qsp.plan_id, qsp.query_id, ''avg writes''
 FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
 JOIN     logical_writes_max AS dm
 ON qsp.last_execution_time >= dm.start_range
@@ -1451,6 +1686,52 @@ EXEC sys.sp_executesql  @stmt = @sql_select,
 						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
 
 
+SET @sql_select = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;';
+SET @sql_select += N'
+WITH logical_writes_max
+AS ( SELECT   TOP 1 
+              gi.start_range,
+              gi.end_range
+     FROM     #grouped_interval AS gi
+     ORDER BY gi.total_max_logical_io_writes_mb DESC )
+INSERT #working_plans WITH (TABLOCK) 
+		( plan_id, query_id, pattern )
+SELECT   TOP ( @sp_Top ) 
+		 qsp.plan_id, qsp.query_id, ''max writes''
+FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
+JOIN     logical_writes_max AS dm
+ON qsp.last_execution_time >= dm.start_range
+   AND qsp.last_execution_time < dm.end_range
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_runtime_stats AS qsrs
+ON qsrs.plan_id = qsp.plan_id
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query AS qsq
+ON qsq.query_id = qsp.query_id
+JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query_text AS qsqt
+ON qsqt.query_text_id = qsq.query_text_id
+WHERE    1 = 1
+    AND qsq.is_internal_query = 0
+	AND qsp.query_plan IS NOT NULL
+	';
+
+SET @sql_select += @sql_where;
+
+SET @sql_select +=  N'ORDER BY qsrs.max_logical_io_writes DESC
+					OPTION (RECOMPILE);
+					';
+
+IF @Debug = 1
+	PRINT @sql_select;
+
+IF @sql_select IS NULL
+    BEGIN
+        RAISERROR(N'@sql_select is NULL', 0, 1) WITH NOWAIT;
+        RETURN;
+    END;
+
+EXEC sys.sp_executesql  @stmt = @sql_select, 
+						@params = @sp_params,
+						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
+
 
 /*Get highest memory use plans*/
 
@@ -1467,7 +1748,7 @@ AS ( SELECT   TOP 1
 INSERT #working_plans WITH (TABLOCK) 
 		( plan_id, query_id, pattern )
 SELECT   TOP ( @sp_Top ) 
-		 qsp.plan_id, qsp.query_id, ''memory''
+		 qsp.plan_id, qsp.query_id, ''avg memory''
 FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
 JOIN     memory_max AS dm
 ON qsp.last_execution_time >= dm.start_range
@@ -1502,6 +1783,51 @@ EXEC sys.sp_executesql  @stmt = @sql_select,
 						@params = @sp_params,
 						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
 
+SET @sql_select = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;';
+SET @sql_select += N'
+WITH memory_max
+AS ( SELECT   TOP 1 
+              gi.start_range,
+              gi.end_range
+     FROM     #grouped_interval AS gi
+     ORDER BY gi.total_max_query_max_used_memory_mb DESC )
+INSERT #working_plans WITH (TABLOCK) 
+		( plan_id, query_id, pattern )
+SELECT   TOP ( @sp_Top ) 
+		 qsp.plan_id, qsp.query_id, ''max memory''
+FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
+JOIN     memory_max AS dm
+ON qsp.last_execution_time >= dm.start_range
+   AND qsp.last_execution_time < dm.end_range
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_runtime_stats AS qsrs
+ON qsrs.plan_id = qsp.plan_id
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query AS qsq
+ON qsq.query_id = qsp.query_id
+JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query_text AS qsqt
+ON qsqt.query_text_id = qsq.query_text_id
+WHERE    1 = 1
+    AND qsq.is_internal_query = 0
+	AND qsp.query_plan IS NOT NULL
+	';
+
+SET @sql_select += @sql_where;
+
+SET @sql_select +=  N'ORDER BY qsrs.max_query_max_used_memory DESC
+					OPTION (RECOMPILE);
+					';
+
+IF @Debug = 1
+	PRINT @sql_select;
+
+IF @sql_select IS NULL
+    BEGIN
+        RAISERROR(N'@sql_select is NULL', 0, 1) WITH NOWAIT;
+        RETURN;
+    END;
+
+EXEC sys.sp_executesql  @stmt = @sql_select, 
+						@params = @sp_params,
+						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
 
 
 /*Get highest row count plans*/
@@ -1519,7 +1845,7 @@ AS ( SELECT   TOP 1
 INSERT #working_plans WITH (TABLOCK) 
 		( plan_id, query_id, pattern )
 SELECT   TOP ( @sp_Top ) 
-		 qsp.plan_id, qsp.query_id, ''rows''
+		 qsp.plan_id, qsp.query_id, ''avg rows''
 FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
 JOIN     rowcount_max AS dm
 ON qsp.last_execution_time >= dm.start_range
@@ -1575,7 +1901,7 @@ AS ( SELECT   TOP 1
 INSERT #working_plans WITH (TABLOCK) 
 		( plan_id, query_id, pattern )
 SELECT   TOP ( @sp_Top ) 
-		 qsp.plan_id, qsp.query_id, ''log bytes''
+		 qsp.plan_id, qsp.query_id, ''avg log bytes''
 FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
 JOIN     rowcount_max AS dm
 ON qsp.last_execution_time >= dm.start_range
@@ -1610,9 +1936,58 @@ EXEC sys.sp_executesql  @stmt = @sql_select,
 						@params = @sp_params,
 						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
 
-/*Get highest row count plans*/
+RAISERROR(N'Gathering highest log byte use plans', 0, 1) WITH NOWAIT;
 
-RAISERROR(N'Gathering highest row count plans', 0, 1) WITH NOWAIT;
+SET @sql_select = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;';
+SET @sql_select += N'
+WITH rowcount_max
+AS ( SELECT   TOP 1 
+              gi.start_range,
+              gi.end_range
+     FROM     #grouped_interval AS gi
+     ORDER BY gi.total_max_log_bytes_mb DESC )
+INSERT #working_plans WITH (TABLOCK) 
+		( plan_id, query_id, pattern )
+SELECT   TOP ( @sp_Top ) 
+		 qsp.plan_id, qsp.query_id, ''max log bytes''
+FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
+JOIN     rowcount_max AS dm
+ON qsp.last_execution_time >= dm.start_range
+   AND qsp.last_execution_time < dm.end_range
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_runtime_stats AS qsrs
+ON qsrs.plan_id = qsp.plan_id
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query AS qsq
+ON qsq.query_id = qsp.query_id
+JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query_text AS qsqt
+ON qsqt.query_text_id = qsq.query_text_id
+WHERE    1 = 1
+    AND qsq.is_internal_query = 0
+	AND qsp.query_plan IS NOT NULL
+	';
+
+SET @sql_select += @sql_where;
+
+SET @sql_select +=  N'ORDER BY qsrs.max_log_bytes_used DESC
+					OPTION (RECOMPILE);
+					';
+
+IF @Debug = 1
+	PRINT @sql_select;
+
+IF @sql_select IS NULL
+    BEGIN
+        RAISERROR(N'@sql_select is NULL', 0, 1) WITH NOWAIT;
+        RETURN;
+    END;
+
+EXEC sys.sp_executesql  @stmt = @sql_select, 
+						@params = @sp_params,
+						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
+
+
+/*Get highest tempdb use plans*/
+
+RAISERROR(N'Gathering highest tempdb use plans', 0, 1) WITH NOWAIT;
 
 SET @sql_select = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;';
 SET @sql_select += N'
@@ -1625,7 +2000,7 @@ AS ( SELECT   TOP 1
 INSERT #working_plans WITH (TABLOCK) 
 		( plan_id, query_id, pattern )
 SELECT   TOP ( @sp_Top ) 
-		 qsp.plan_id, qsp.query_id, ''tempdb space''
+		 qsp.plan_id, qsp.query_id, ''avg tempdb space''
 FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
 JOIN     rowcount_max AS dm
 ON qsp.last_execution_time >= dm.start_range
@@ -1659,6 +2034,53 @@ IF @sql_select IS NULL
 EXEC sys.sp_executesql  @stmt = @sql_select, 
 						@params = @sp_params,
 						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
+
+SET @sql_select = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;';
+SET @sql_select += N'
+WITH rowcount_max
+AS ( SELECT   TOP 1 
+              gi.start_range,
+              gi.end_range
+     FROM     #grouped_interval AS gi
+     ORDER BY gi.total_max_tempdb_space DESC )
+INSERT #working_plans WITH (TABLOCK) 
+		( plan_id, query_id, pattern )
+SELECT   TOP ( @sp_Top ) 
+		 qsp.plan_id, qsp.query_id, ''max tempdb space''
+FROM     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
+JOIN     rowcount_max AS dm
+ON qsp.last_execution_time >= dm.start_range
+   AND qsp.last_execution_time < dm.end_range
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_runtime_stats AS qsrs
+ON qsrs.plan_id = qsp.plan_id
+JOIN     ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query AS qsq
+ON qsq.query_id = qsp.query_id
+JOIN ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_query_text AS qsqt
+ON qsqt.query_text_id = qsq.query_text_id
+WHERE    1 = 1
+    AND qsq.is_internal_query = 0
+	AND qsp.query_plan IS NOT NULL
+	';
+
+SET @sql_select += @sql_where;
+
+SET @sql_select +=  N'ORDER BY qsrs.max_tempdb_space_used DESC
+					OPTION (RECOMPILE);
+					';
+
+IF @Debug = 1
+	PRINT @sql_select;
+
+IF @sql_select IS NULL
+    BEGIN
+        RAISERROR(N'@sql_select is NULL', 0, 1) WITH NOWAIT;
+        RETURN;
+    END;
+
+EXEC sys.sp_executesql  @stmt = @sql_select, 
+						@params = @sp_params,
+						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
+
 
 END;
 
@@ -1854,6 +2276,24 @@ SET proc_or_function_name = N'Statement'
 WHERE proc_or_function_name IS NULL
 OPTION(RECOMPILE);
 
+SET @sql_select = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;';
+SET @sql_select += N'
+    WITH patterns AS (
+         SELECT query_id, planid_path = STUFF((SELECT DISTINCT N'', '' + RTRIM(qsp2.plan_id)
+             									FROM ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp2
+             									WHERE qsp.query_id = qsp2.query_id
+             									FOR XML PATH(N''''), TYPE).value(N''.[1]'', N''NVARCHAR(MAX)''), 1, 2, N'''')
+         FROM ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
+    )
+    UPDATE wm
+    SET wm.query_id_all_plan_ids = patterns.planid_path
+    FROM #working_metrics AS wm
+    JOIN patterns
+    ON  wm.query_id = patterns.query_id
+    OPTION (RECOMPILE);
+'
+
+EXEC sys.sp_executesql  @stmt = @sql_select;
 
 /*
 This gathers data for the #working_plan_text table
@@ -1911,29 +2351,6 @@ EXEC sys.sp_executesql  @stmt = @sql_select,
 						@params = @sp_params,
 						@sp_Top = @Top, @sp_StartDate = @StartDate, @sp_EndDate = @EndDate, @sp_MinimumExecutionCount = @MinimumExecutionCount, @sp_MinDuration = @duration_filter_ms, @sp_StoredProcName = @StoredProcName, @sp_PlanIdFilter = @PlanIdFilter, @sp_QueryIdFilter = @QueryIdFilter;
 
-
-
-/*
-
-Some memory grant information isn't available in query store
-
-We have to go back to other DMVs to find it, when possible
-
-It may not be there for various reaons
-
-*/
-RAISERROR(N'Checking dm_exec_query_stats for memory grant info', 0, 1) WITH NOWAIT;
-WITH max_mem
-AS ( SELECT   deqs.sql_handle, MAX(deqs.min_grant_kb) AS min_grant_kb, MAX(deqs.max_used_grant_kb) AS max_used_grant_kb
-     FROM     sys.dm_exec_query_stats AS deqs
-     GROUP BY deqs.sql_handle )
-UPDATE wpt
-SET    wpt.min_grant_kb = deqs.min_grant_kb,
-       wpt.max_used_grant_kb = deqs.max_used_grant_kb
-FROM   #working_plan_text AS wpt
-JOIN   max_mem AS deqs
-ON wpt.statement_sql_handle = deqs.sql_handle
-OPTION (RECOMPILE);
 
 
 /*
@@ -2066,7 +2483,8 @@ END;
 
 UPDATE #working_plan_text
 SET top_three_waits = CASE 
-						WHEN @waitstats = 0 THEN N'The query store waits stats DMV is not available'
+						WHEN @waitstats = 0 
+                        THEN N'The query store waits stats DMV is not available'
 						ELSE N'No Significant waits detected!'
 						END
 WHERE top_three_waits IS NULL
@@ -2106,7 +2524,7 @@ RAISERROR(N'Populate working warnings table with gathered plans', 0, 1) WITH NOW
 
 SET @sql_select = N'SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;';
 SET @sql_select += N'
-SELECT wp.plan_id, wp.query_id, qsq.query_hash, qsqt.statement_sql_handle
+SELECT DISTINCT wp.plan_id, wp.query_id, qsq.query_hash, qsqt.statement_sql_handle
 FROM   #working_plans AS wp
 JOIN   ' + QUOTENAME(@DatabaseName) + N'.sys.query_store_plan AS qsp
 ON qsp.plan_id = wp.plan_id
@@ -2187,12 +2605,14 @@ WHERE    1 = 1
 
 SET @sql_select += @sql_where;
 
-SET @sql_select += N'GROUP BY wp.query_id
-					HAVING COUNT(qsp.plan_id) > 1
-					) AS x
-					ON ww.query_id = x.query_id
-					OPTION (RECOMPILE);
-					';
+SET @sql_select += 
+N'GROUP BY wp.query_id
+  HAVING COUNT(qsp.plan_id) > 1
+) AS x
+    ON ww.query_id = x.query_id
+OPTION (RECOMPILE);
+';
+
 IF @Debug = 1
 	PRINT @sql_select;
 
@@ -2350,8 +2770,8 @@ RAISERROR(N'Begin XML nodes parsing', 0, 1) WITH NOWAIT;
 
 RAISERROR(N'Inserting #statements', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
-INSERT #statements WITH (TABLOCK) ( plan_id, query_id, query_hash, sql_handle, statement )	
-	SELECT ww.plan_id, ww.query_id, ww.query_hash, ww.sql_handle, q.n.query('.') AS statement
+INSERT #statements WITH (TABLOCK) ( plan_id, query_id, query_hash, sql_handle, statement, is_cursor )	
+	SELECT ww.plan_id, ww.query_id, ww.query_hash, ww.sql_handle, q.n.query('.') AS statement, 0 AS is_cursor
 	FROM #working_warnings AS ww
 	JOIN #working_plan_text AS wp
 	ON ww.plan_id = wp.plan_id
@@ -2361,8 +2781,8 @@ OPTION (RECOMPILE);
 
 RAISERROR(N'Inserting parsed cursor XML to #statements', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
-INSERT #statements WITH (TABLOCK) ( plan_id, query_id, query_hash, sql_handle, statement )
-	SELECT ww.plan_id, ww.query_id, ww.query_hash, ww.sql_handle, q.n.query('.') AS statement
+INSERT #statements WITH (TABLOCK) ( plan_id, query_id, query_hash, sql_handle, statement, is_cursor )
+	SELECT ww.plan_id, ww.query_id, ww.query_hash, ww.sql_handle, q.n.query('.') AS statement, 1 AS is_cursor
 	FROM #working_warnings AS ww
 	JOIN #working_plan_text AS wp
 	ON ww.plan_id = wp.plan_id
@@ -2686,6 +3106,17 @@ JOIN (
 ON  b.sql_handle = y.sql_handle
 OPTION (RECOMPILE);
 
+IF NOT EXISTS(SELECT 1/0 FROM #statements AS s WHERE s.is_cursor = 1)
+BEGIN
+
+RAISERROR(N'No cursor plans found, skipping', 0, 1) WITH NOWAIT;
+
+END
+
+IF EXISTS(SELECT 1/0 FROM #statements AS s WHERE s.is_cursor = 1)
+BEGIN
+
+RAISERROR(N'Cursor plans found, investigating', 0, 1) WITH NOWAIT;
 
 RAISERROR(N'Checking for Optimistic cursors', 0, 1) WITH NOWAIT;
 WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
@@ -2696,6 +3127,7 @@ JOIN #statements AS s
 ON b.sql_handle = s.sql_handle
 CROSS APPLY s.statement.nodes('/p:StmtCursor') AS n1(fn)
 WHERE n1.fn.exist('//p:CursorPlan/@CursorConcurrency[.="Optimistic"]') = 1
+AND s.is_cursor = 1
 OPTION (RECOMPILE);
 
 
@@ -2708,6 +3140,7 @@ JOIN #statements AS s
 ON b.sql_handle = s.sql_handle
 CROSS APPLY s.statement.nodes('/p:StmtCursor') AS n1(fn)
 WHERE n1.fn.exist('//p:CursorPlan/@ForwardOnly[.="true"]') = 1
+AND s.is_cursor = 1
 OPTION (RECOMPILE);
 
 
@@ -2716,10 +3149,11 @@ WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS 
 UPDATE b
 SET b.is_fast_forward_cursor = 1
 FROM #working_warnings b
-JOIN #statements AS qs
-ON b.sql_handle = qs.sql_handle
-CROSS APPLY qs.statement.nodes('/p:StmtCursor') AS n1(fn)
+JOIN #statements AS s
+ON b.sql_handle = s.sql_handle
+CROSS APPLY s.statement.nodes('/p:StmtCursor') AS n1(fn)
 WHERE n1.fn.exist('//p:CursorPlan/@CursorActualType[.="FastForward"]') = 1
+AND s.is_cursor = 1
 OPTION (RECOMPILE);
 
 
@@ -2732,8 +3166,10 @@ JOIN #statements AS s
 ON b.sql_handle = s.sql_handle
 CROSS APPLY s.statement.nodes('/p:StmtCursor') AS n1(fn)
 WHERE n1.fn.exist('//p:CursorPlan/@CursorActualType[.="Dynamic"]') = 1
+AND s.is_cursor = 1
 OPTION (RECOMPILE);
 
+END
 
 IF @ExpertMode > 0
 BEGIN
@@ -2937,7 +3373,7 @@ AS ( SELECT DISTINCT r.plan_id,
 	   c.n.value('@EstimateRows', 'FLOAT') AS estimated_rows,
        c.n.value('@EstimateIO', 'FLOAT') AS estimated_io,
        c.n.value('@EstimateCPU', 'FLOAT') AS estimated_cpu,
-       c.n.value('@EstimateRewinds', 'FLOAT') AS estimated_rewinds
+       c.n.value('@EstimateRebinds', 'FLOAT') AS estimated_rebinds
 FROM   #relop AS r
 JOIN   selects AS s
 ON s.plan_id = r.plan_id
@@ -2947,7 +3383,7 @@ WHERE  r.relop.exist('/p:RelOp[@PhysicalOp="Index Spool" and @LogicalOp="Eager S
 )
 UPDATE ww
 		SET ww.index_spool_rows = sp.estimated_rows,
-			ww.index_spool_cost = ((sp.estimated_io * sp.estimated_cpu) * CASE WHEN sp.estimated_rewinds < 1 THEN 1 ELSE sp.estimated_rewinds END)
+			ww.index_spool_cost = ((sp.estimated_io * sp.estimated_cpu) * CASE WHEN sp.estimated_rebinds < 1 THEN 1 ELSE sp.estimated_rebinds END)
 
 FROM #working_warnings ww
 JOIN spools sp
@@ -2965,7 +3401,6 @@ BEGIN
 
 RAISERROR(N'Beginning 2017 and 2016 SP2 specfic checks', 0, 1) WITH NOWAIT;
 
-
 IF @ExpertMode > 0
 BEGIN
 RAISERROR('Gathering stats information', 0, 1) WITH NOWAIT;
@@ -2974,7 +3409,7 @@ INSERT #stats_agg WITH (TABLOCK)
 	(sql_handle, last_update, modification_count, sampling_percent, [statistics], [table], [schema], [database])
 SELECT qp.sql_handle,
 	   x.c.value('@LastUpdate', 'DATETIME2(7)') AS LastUpdate,
-	   x.c.value('@ModificationCount', 'INT') AS ModificationCount,
+	   x.c.value('@ModificationCount', 'BIGINT') AS ModificationCount,
 	   x.c.value('@SamplingPercent', 'FLOAT') AS SamplingPercent,
 	   x.c.value('@Statistics', 'NVARCHAR(258)') AS [Statistics], 
 	   x.c.value('@Table', 'NVARCHAR(258)') AS [Table], 
@@ -3232,7 +3667,7 @@ OPTION ( RECOMPILE );
 						 AND ci.convert_implicit_charindex = 0
 					THEN SUBSTRING(ci.expression, ci.equal_charindex, 4000)
 					WHEN ci.at_charindex = 0
-		                 AND ci.equal_charindex > 0 
+		                 AND (ci.equal_charindex -1) > 0 
 						 AND ci.convert_implicit_charindex > 0
 					THEN SUBSTRING(ci.expression, 0, ci.equal_charindex -1)
 		            WHEN ci.at_charindex > 0
@@ -3282,25 +3717,26 @@ OPTION ( RECOMPILE );
 		
 		RAISERROR(N'Updating procs', 0, 1) WITH NOWAIT;
 		UPDATE s
-		SET    s.variable_datatype = CASE WHEN s.variable_datatype LIKE '%(%)%' THEN
-		                                      LEFT(s.variable_datatype, CHARINDEX('(', s.variable_datatype) - 1)
+		SET    s.variable_datatype = CASE WHEN s.variable_datatype LIKE '%(%)%' 
+                                          THEN LEFT(s.variable_datatype, CHARINDEX('(', s.variable_datatype) - 1)
 										  ELSE s.variable_datatype
 		                             END,
-		       s.converted_to = CASE WHEN s.converted_to LIKE '%(%)%' THEN
-		                                 LEFT(s.converted_to, CHARINDEX('(', s.converted_to) - 1)
+		       s.converted_to = CASE WHEN s.converted_to LIKE '%(%)%' 
+                                     THEN LEFT(s.converted_to, CHARINDEX('(', s.converted_to) - 1)
 		                             ELSE s.converted_to
 		                        END,
-			   s.compile_time_value = CASE WHEN s.compile_time_value LIKE '%(%)%' THEN
-												SUBSTRING(s.compile_time_value, 
-															CHARINDEX('(', s.compile_time_value) + 1,
-															CHARINDEX(')', s.compile_time_value) - 1
-															- CHARINDEX('(', s.compile_time_value)
-															)
+			   s.compile_time_value = CASE WHEN s.compile_time_value LIKE '%(%)%' 
+                                           THEN SUBSTRING(s.compile_time_value, 
+														  CHARINDEX('(', s.compile_time_value) + 1,
+														  CHARINDEX(')', s.compile_time_value) - 1 - CHARINDEX('(', s.compile_time_value)
+														  )
 											WHEN variable_datatype NOT IN ('bit', 'tinyint', 'smallint', 'int', 'bigint') 
 												AND s.variable_datatype NOT LIKE '%binary%' 
 												AND s.compile_time_value NOT LIKE 'N''%'''
-												AND s.compile_time_value NOT LIKE '''%''' THEN
-												QUOTENAME(compile_time_value, '''')
+												AND s.compile_time_value NOT LIKE '''%''' 
+                                                AND s.compile_time_value <> s.column_name
+                                                AND s.compile_time_value <> '**idk_man**'
+                                                THEN QUOTENAME(compile_time_value, '''')
 									ELSE s.compile_time_value 
 									  END
 		FROM   #stored_proc_info AS s
@@ -3503,12 +3939,16 @@ SET    b.implicit_conversion_info = CASE WHEN b.implicit_conversion_info IS NULL
 FROM   #working_warnings AS b
 OPTION (RECOMPILE);
 
-/*Begin Missing Index*/
+/*End implicit conversion and parameter info*/
 
-IF EXISTS 
-	(SELECT 1 FROM #working_warnings AS ww WHERE ww.missing_index_count > 0 )
-	
-	BEGIN
+/*Begin Missing Index*/
+IF EXISTS ( SELECT 1/0 
+            FROM #working_warnings AS ww 
+            WHERE ww.missing_index_count > 0
+		    OR ww.index_spool_cost > 0
+		    OR ww.index_spool_rows > 0 )
+		   
+		BEGIN	
 	
 		RAISERROR(N'Inserting to #missing_index_xml', 0, 1) WITH NOWAIT;
 		WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
@@ -3527,9 +3967,9 @@ IF EXISTS
 		WITH XMLNAMESPACES ( 'http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p )
 		INSERT #missing_index_schema
 		SELECT mix.query_hash, mix.sql_handle, mix.impact,
-		       c.mi.value('@Database', 'NVARCHAR(128)') ,
-		       c.mi.value('@Schema', 'NVARCHAR(128)') ,
-		       c.mi.value('@Table', 'NVARCHAR(128)') ,
+		       c.mi.value('@Database', 'NVARCHAR(128)'),
+		       c.mi.value('@Schema', 'NVARCHAR(128)'),
+		       c.mi.value('@Table', 'NVARCHAR(128)'),
 			   c.mi.query('.')
 		FROM #missing_index_xml AS mix
 		CROSS APPLY mix.index_xml.nodes('//p:MissingIndex') AS c(mi)
@@ -3562,7 +4002,7 @@ IF EXISTS
 		
 		RAISERROR(N'Inserting to #missing_index_pretty', 0, 1) WITH NOWAIT;
 		INSERT #missing_index_pretty
-		SELECT m.query_hash, m.sql_handle, m.impact, m.database_name, m.schema_name, m.table_name
+		SELECT DISTINCT m.query_hash, m.sql_handle, m.impact, m.database_name, m.schema_name, m.table_name
 		, STUFF((   SELECT DISTINCT N', ' + ISNULL(m2.column_name, '') AS column_name
 		                 FROM   #missing_index_detail AS m2
 		                 WHERE  m2.usage = 'EQUALITY'
@@ -3592,16 +4032,84 @@ IF EXISTS
 						 AND m.database_name = m2.database_name
 						 AND m.schema_name = m2.schema_name
 						 AND m.table_name = m2.table_name
-		                 FOR XML PATH(N''), TYPE ).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 2, N'') AS [include]
+		                 FOR XML PATH(N''), TYPE ).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 2, N'') AS [include],
+		0 AS is_spool
 		FROM #missing_index_detail AS m
 		GROUP BY m.query_hash, m.sql_handle, m.impact, m.database_name, m.schema_name, m.table_name
 		OPTION (RECOMPILE);
+
+		RAISERROR(N'Inserting to #index_spool_ugly', 0, 1) WITH NOWAIT;
+		WITH XMLNAMESPACES('http://schemas.microsoft.com/sqlserver/2004/07/showplan' AS p)
+		INSERT #index_spool_ugly 
+		        (query_hash, sql_handle, impact, database_name, schema_name, table_name, equality, inequality, include)
+		SELECT r.query_hash, 
+		       r.sql_handle,                                                                               
+		       (c.n.value('@EstimateIO', 'FLOAT') + (c.n.value('@EstimateCPU', 'FLOAT'))) 
+					/ ( 1 * NULLIF(ww.query_cost, 0)) * 100 AS impact, 
+			   o.n.value('@Database', 'NVARCHAR(128)') AS output_database, 
+			   o.n.value('@Schema', 'NVARCHAR(128)') AS output_schema, 
+			   o.n.value('@Table', 'NVARCHAR(128)') AS output_table, 
+		       k.n.value('@Column', 'NVARCHAR(128)') AS range_column,
+			   e.n.value('@Column', 'NVARCHAR(128)') AS expression_column,
+			   o.n.value('@Column', 'NVARCHAR(128)') AS output_column
+		FROM #relop AS r
+		JOIN #working_warnings AS ww
+		ON ww.query_hash = r.query_hash
+		CROSS APPLY r.relop.nodes('/p:RelOp') AS c(n)
+		CROSS APPLY r.relop.nodes('/p:RelOp/p:OutputList/p:ColumnReference') AS o(n)
+		OUTER APPLY r.relop.nodes('/p:RelOp/p:Spool/p:SeekPredicateNew/p:SeekKeys/p:Prefix/p:RangeColumns/p:ColumnReference') AS k(n)
+		OUTER APPLY r.relop.nodes('/p:RelOp/p:Spool/p:SeekPredicateNew/p:SeekKeys/p:Prefix/p:RangeExpressions/p:ColumnReference') AS e(n)
+		WHERE  r.relop.exist('/p:RelOp[@PhysicalOp="Index Spool" and @LogicalOp="Eager Spool"]') = 1
 		
+		RAISERROR(N'Inserting to spools to #missing_index_pretty', 0, 1) WITH NOWAIT;
+		INSERT #missing_index_pretty
+			(query_hash, sql_handle, impact, database_name, schema_name, table_name, equality, inequality, include, is_spool)
+		SELECT DISTINCT 
+		       isu.query_hash,
+		       isu.sql_handle,
+		       isu.impact,
+		       isu.database_name,
+		       isu.schema_name,
+		       isu.table_name
+			   , STUFF((   SELECT DISTINCT N', ' + ISNULL(isu2.equality, '') AS column_name
+			   		                 FROM   #index_spool_ugly AS isu2
+			   		                 WHERE  isu2.equality IS NOT NULL
+			   						 AND isu.query_hash = isu2.query_hash
+			   						 AND isu.sql_handle = isu2.sql_handle
+			   						 AND isu.impact = isu2.impact
+			   						 AND isu.database_name = isu2.database_name
+			   						 AND isu.schema_name = isu2.schema_name
+			   						 AND isu.table_name = isu2.table_name
+			   		                 FOR XML PATH(N''), TYPE ).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 2, N'') AS equality
+			   , STUFF((   SELECT DISTINCT N', ' + ISNULL(isu2.inequality, '') AS column_name
+			   		                 FROM   #index_spool_ugly AS isu2
+			   		                 WHERE  isu2.inequality IS NOT NULL
+			   						 AND isu.query_hash = isu2.query_hash
+			   						 AND isu.sql_handle = isu2.sql_handle
+			   						 AND isu.impact = isu2.impact
+			   						 AND isu.database_name = isu2.database_name
+			   						 AND isu.schema_name = isu2.schema_name
+			   						 AND isu.table_name = isu2.table_name
+			   		                 FOR XML PATH(N''), TYPE ).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 2, N'') AS inequality
+			   , STUFF((   SELECT DISTINCT N', ' + ISNULL(isu2.include, '') AS column_name
+			   		                 FROM   #index_spool_ugly AS isu2
+			   		                 WHERE  isu2.include IS NOT NULL
+			   						 AND isu.query_hash = isu2.query_hash
+			   						 AND isu.sql_handle = isu2.sql_handle
+			   						 AND isu.impact = isu2.impact
+			   						 AND isu.database_name = isu2.database_name
+			   						 AND isu.schema_name = isu2.schema_name
+			   						 AND isu.table_name = isu2.table_name
+			   		                 FOR XML PATH(N''), TYPE ).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 2, N'') AS include,
+			   1 AS is_spool
+		FROM #index_spool_ugly AS isu
+
+
 		RAISERROR(N'Updating missing index information', 0, 1) WITH NOWAIT;
 		WITH missing AS (
-		SELECT mip.query_hash,
+		SELECT DISTINCT
+		       mip.query_hash,
 		       mip.sql_handle, 
-			   CONVERT(XML,
 			   N'<MissingIndexes><![CDATA['
 			   + CHAR(10) + CHAR(13)
 			   + STUFF((   SELECT CHAR(10) + CHAR(13) + ISNULL(mip2.details, '') AS details
@@ -3613,7 +4121,7 @@ IF EXISTS
 						   FOR XML PATH(N''), TYPE ).value(N'.[1]', N'NVARCHAR(MAX)'), 1, 2, N'') 
 			   + CHAR(10) + CHAR(13)
 			   + N']]></MissingIndexes>'  
-			   ) AS full_details
+			   AS full_details
 		FROM #missing_index_pretty AS mip
 		GROUP BY mip.query_hash, mip.sql_handle, mip.impact
 						)
@@ -3623,9 +4131,6 @@ IF EXISTS
 		JOIN missing AS m
 		ON m.sql_handle = ww.sql_handle
 		OPTION (RECOMPILE);
-
-	
-	END;
 
 	RAISERROR(N'Filling in missing index blanks', 0, 1) WITH NOWAIT;
 	UPDATE ww
@@ -3637,6 +4142,7 @@ IF EXISTS
 	FROM #working_warnings AS ww
 	OPTION (RECOMPILE);
 
+END
 /*End Missing Index*/
 
 RAISERROR(N'General query dispositions: frequent executions, long running, etc.', 0, 1) WITH NOWAIT;
@@ -3652,7 +4158,7 @@ SET    b.frequent_execution = CASE WHEN wm.xpm > @execution_threshold THEN 1 END
 	   b.is_key_lookup_expensive = CASE WHEN b.query_cost >= (@ctp / 2) AND b.key_lookup_cost >= b.query_cost * .5 THEN 1 END,
 	   b.is_sort_expensive = CASE WHEN b.query_cost >= (@ctp / 2) AND b.sort_cost >= b.query_cost * .5 THEN 1 END,
 	   b.is_remote_query_expensive = CASE WHEN b.remote_query_cost >= b.query_cost * .05 THEN 1 END,
-	   b.is_unused_grant = CASE WHEN percent_memory_grant_used <= @memory_grant_warning_percent AND min_grant_kb > @min_memory_per_query THEN 1 END,
+	   b.is_unused_grant = CASE WHEN percent_memory_grant_used <= @memory_grant_warning_percent AND min_query_max_used_memory > @min_memory_per_query THEN 1 END,
 	   b.long_running_low_cpu = CASE WHEN wm.avg_duration > wm.avg_cpu_time * 4 AND avg_cpu_time < 500. THEN 1 END,
 	   b.low_cost_high_cpu = CASE WHEN b.query_cost < 10 AND wm.avg_cpu_time > 5000. THEN 1 END,
 	   b.is_spool_expensive = CASE WHEN b.query_cost > (@ctp / 2) AND b.index_spool_cost >= b.query_cost * .1 THEN 1 END,
@@ -3770,7 +4276,7 @@ RAISERROR(N'Checking for parameter sniffing symptoms', 0, 1) WITH NOWAIT;
 
 UPDATE b
 SET b.parameter_sniffing_symptoms = 
-CASE WHEN b.count_executions < 4 THEN 'Too few executions to compare (< 4).'
+CASE WHEN b.count_executions < 2 THEN 'Too few executions to compare (< 2).'
 	ELSE													
 	SUBSTRING(  
 				/*Duration*/
@@ -3809,10 +4315,9 @@ CASE WHEN b.count_executions < 4 THEN 'Too few executions to compare (< 4).'
 				CASE WHEN b.last_rowcount * 100 < b.avg_rowcount  THEN ', Low row count run' ELSE '' END +
 				CASE WHEN b.last_rowcount > b.avg_rowcount * 100 THEN ', High row count last run' ELSE '' END +
 				/*DOP*/
-				CASE WHEN b.min_dop = 1 THEN ', Serial sometimes' ELSE '' END +
-				CASE WHEN b.max_dop > 1 THEN ', Parallel sometimes' ELSE '' END +
-				CASE WHEN b.last_dop = 1  THEN ', Serial last run' ELSE '' END +
-				CASE WHEN b.last_dop > 1 THEN ', Parallel last run' ELSE '' END +
+				CASE WHEN b.min_dop <> b.max_dop THEN ', Serial sometimes' ELSE '' END +
+				CASE WHEN b.min_dop <> b.max_dop AND b.last_dop = 1  THEN ', Serial last run' ELSE '' END +
+				CASE WHEN b.min_dop <> b.max_dop AND b.last_dop > 1 THEN ', Parallel last run' ELSE '' END +
 				/*tempdb*/
 				CASE WHEN b.min_tempdb_space_used * 100 < b.avg_tempdb_space_used THEN ', Low tempdb sometimes' ELSE '' END +
 				CASE WHEN b.max_tempdb_space_used > b.avg_tempdb_space_used * 100 THEN ', High tempdb sometimes' ELSE '' END +
@@ -3858,9 +4363,8 @@ BEGIN
 
 RAISERROR(N'Returning regular results', 0, 1) WITH NOWAIT;
 
-
 WITH x AS (
-SELECT wpt.database_name, ww.query_cost, wm.plan_id, wm.query_id, wpt.query_sql_text, wm.proc_or_function_name, wpt.query_plan_xml, ww.warnings, wpt.pattern, 
+SELECT wpt.database_name, ww.query_cost, wm.plan_id, wm.query_id, wm.query_id_all_plan_ids, wpt.query_sql_text, wm.proc_or_function_name, wpt.query_plan_xml, ww.warnings, wpt.pattern, 
 	   wm.parameter_sniffing_symptoms, wpt.top_three_waits, ww.missing_indexes, ww.implicit_conversion_info, ww.cached_execution_parameters, wm.count_executions, wm.count_compiles, wm.total_cpu_time, wm.avg_cpu_time,
 	   wm.total_duration, wm.avg_duration, wm.total_logical_io_reads, wm.avg_logical_io_reads,
 	   wm.total_physical_io_reads, wm.avg_physical_io_reads, wm.total_logical_io_writes, wm.avg_logical_io_writes, wm.total_rowcount, wm.avg_rowcount,
@@ -3889,7 +4393,7 @@ BEGIN
 RAISERROR(N'Returning results for failed queries', 0, 1) WITH NOWAIT;
 
 WITH x AS (
-SELECT wpt.database_name, ww.query_cost, wm.plan_id, wm.query_id, wpt.query_sql_text, wm.proc_or_function_name, wpt.query_plan_xml, ww.warnings, wpt.pattern, 
+SELECT wpt.database_name, ww.query_cost, wm.plan_id, wm.query_id, wm.query_id_all_plan_ids, wpt.query_sql_text, wm.proc_or_function_name, wpt.query_plan_xml, ww.warnings, wpt.pattern, 
 	   wm.parameter_sniffing_symptoms, wpt.last_force_failure_reason_desc, wpt.top_three_waits, ww.missing_indexes, ww.implicit_conversion_info, ww.cached_execution_parameters, 
 	   wm.count_executions, wm.count_compiles, wm.total_cpu_time, wm.avg_cpu_time,
 	   wm.total_duration, wm.avg_duration, wm.total_logical_io_reads, wm.avg_logical_io_reads,
@@ -3923,7 +4427,7 @@ SET query_sql_text = SUBSTRING(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(query_sql_tex
 OPTION (RECOMPILE);
 
 WITH x AS (
-SELECT wpt.database_name, ww.query_cost, wm.plan_id, wm.query_id, wpt.query_sql_text, wm.proc_or_function_name, ww.warnings, wpt.pattern, 
+SELECT wpt.database_name, ww.query_cost, wm.plan_id, wm.query_id, wm.query_id_all_plan_ids, wpt.query_sql_text, wm.proc_or_function_name, ww.warnings, wpt.pattern, 
 	   wm.parameter_sniffing_symptoms, wpt.last_force_failure_reason_desc, wpt.top_three_waits, wm.count_executions, wm.count_compiles, wm.total_cpu_time, wm.avg_cpu_time,
 	   wm.total_duration, wm.avg_duration, wm.total_logical_io_reads, wm.avg_logical_io_reads,
 	   wm.total_physical_io_reads, wm.avg_physical_io_reads, wm.total_logical_io_writes, wm.avg_logical_io_writes, wm.total_rowcount, wm.avg_rowcount,
@@ -3952,7 +4456,7 @@ BEGIN
 RAISERROR(N'Returning results for skipped XML', 0, 1) WITH NOWAIT;
 
 WITH x AS (
-SELECT wpt.database_name, wm.plan_id, wm.query_id, wpt.query_sql_text, wpt.query_plan_xml, wpt.pattern, 
+SELECT wpt.database_name, wm.plan_id, wm.query_id, wm.query_id_all_plan_ids, wpt.query_sql_text, wpt.query_plan_xml, wpt.pattern, 
 	   wm.parameter_sniffing_symptoms, wpt.top_three_waits, wm.count_executions, wm.count_compiles, wm.total_cpu_time, wm.avg_cpu_time,
 	   wm.total_duration, wm.avg_duration, wm.total_logical_io_reads, wm.avg_logical_io_reads,
 	   wm.total_physical_io_reads, wm.avg_physical_io_reads, wm.total_logical_io_writes, wm.avg_logical_io_writes, wm.total_rowcount, wm.avg_rowcount,
@@ -4797,7 +5301,7 @@ BEGIN
                      50,
                      'Non-SARGable queries',
                      'Queries may be using',
-                     'http://brentozar.com/go/sargable',
+                     'https://www.brentozar.com/blitzcache/non-sargable-predicates/',
 					 'Occurs when join inputs aren''t known to be unique. Can be really bad when parallel.');
 					
         IF EXISTS (SELECT 1/0
@@ -4810,7 +5314,7 @@ BEGIN
                      200,
                      'Is Paul White Electric?',
                      'This query has a Switch operator in it!',
-                     'http://sqlblog.com/blogs/paul_white/archive/2013/06/11/hello-operator-my-switch-is-bored.aspx',
+                     'https://www.sql.kiwi/2013/06/hello-operator-my-switch-is-bored.html',
                      'You should email this query plan to Paul: SQLkiwi at gmail dot com') ;
 					 
 					 						 					
@@ -4842,18 +5346,6 @@ BEGIN
                     'https://www.brentozar.com/blitz/trace-flags-enabled-globally/',
                     'You have the following Global Trace Flags enabled: ' + (SELECT TOP 1 tf.global_trace_flags FROM #trace_flags AS tf WHERE tf.global_trace_flags IS NOT NULL)) ;
 
-        IF EXISTS (SELECT 1/0
-                   FROM   #working_plan_text AS p
-                   WHERE  p.min_grant_kb IS NULL
-				   )
-            INSERT INTO #warning_results (CheckID, Priority, FindingsGroup, Finding, URL, Details)
-            VALUES (
-                    1001,
-                    255,
-                    'Plans not in cache',
-                    'We checked sys.dm_exec_query_stats for memory grant info',
-                    '',
-                    'Plans in Query Store aren''t in other DMVs, which means we can''t get some information about them.') ;
 
 			/*
 			Return worsts
@@ -4871,6 +5363,14 @@ BEGIN
 			       gi.total_rowcount,
 				   gi.total_avg_log_bytes_mb,
 				   gi.total_avg_tempdb_space,
+                   gi.total_max_duration_ms, 
+                   gi.total_max_cpu_time_ms, 
+                   gi.total_max_logical_io_reads_mb,
+                   gi.total_max_physical_io_reads_mb, 
+                   gi.total_max_logical_io_writes_mb, 
+                   gi.total_max_query_max_used_memory_mb,
+                   gi.total_max_log_bytes_mb, 
+                   gi.total_max_tempdb_space,
 				   CONVERT(NVARCHAR(20), gi.flat_date) AS worst_date,
 				   CASE WHEN DATEPART(HOUR, gi.start_range) = 0 THEN ' midnight '
 						WHEN DATEPART(HOUR, gi.start_range) <= 12 THEN CONVERT(NVARCHAR(3), DATEPART(HOUR, gi.start_range)) + 'am '
@@ -4881,79 +5381,145 @@ BEGIN
 						WHEN DATEPART(HOUR, gi.end_range) > 12 THEN CONVERT(NVARCHAR(3),  DATEPART(HOUR, gi.end_range) -12) + 'pm '
 						END AS worst_end_time
 			FROM   #grouped_interval AS gi
-			), 
+			), /*averages*/
 				duration_worst AS (
-			SELECT TOP 1 'Your worst duration range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			SELECT TOP 1 'Your worst avg duration range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
 			FROM worsts
 			ORDER BY worsts.total_avg_duration_ms DESC
 				), 
 				cpu_worst AS (
-			SELECT TOP 1 'Your worst cpu range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			SELECT TOP 1 'Your worst avg cpu range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
 			FROM worsts
 			ORDER BY worsts.total_avg_cpu_time_ms DESC
 				), 
 				logical_reads_worst AS (
-			SELECT TOP 1 'Your worst logical read range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			SELECT TOP 1 'Your worst avg logical read range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
 			FROM worsts
 			ORDER BY worsts.total_avg_logical_io_reads_mb DESC
 				), 
 				physical_reads_worst AS (
-			SELECT TOP 1 'Your worst physical read range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			SELECT TOP 1 'Your worst avg physical read range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
 			FROM worsts
 			ORDER BY worsts.total_avg_physical_io_reads_mb DESC
 				), 
 				logical_writes_worst AS (
-			SELECT TOP 1 'Your worst logical write range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			SELECT TOP 1 'Your worst avg logical write range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
 			FROM worsts
 			ORDER BY worsts.total_avg_logical_io_writes_mb DESC
 				), 
 				memory_worst AS (
-			SELECT TOP 1 'Your worst memory range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			SELECT TOP 1 'Your worst avg memory range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
 			FROM worsts
 			ORDER BY worsts.total_avg_query_max_used_memory_mb DESC
 				), 
 				rowcount_worst AS (
-			SELECT TOP 1 'Your worst row count range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			SELECT TOP 1 'Your worst avg row count range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
 			FROM worsts
 			ORDER BY worsts.total_rowcount DESC
 				), 
 				logbytes_worst AS (
-			SELECT TOP 1 'Your worst log bytes range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			SELECT TOP 1 'Your worst avg log bytes range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
 			FROM worsts
 			ORDER BY worsts.total_avg_log_bytes_mb DESC
 				), 
 				tempdb_worst AS (
-			SELECT TOP 1 'Your worst tempdb range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			SELECT TOP 1 'Your worst avg tempdb range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
 			FROM worsts
 			ORDER BY worsts.total_avg_tempdb_space DESC
+				)/*maxes*/, 
+				max_duration_worst AS (
+			SELECT TOP 1 'Your worst max duration range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			FROM worsts
+			ORDER BY worsts.total_max_duration_ms DESC
+				), 
+				max_cpu_worst AS (
+			SELECT TOP 1 'Your worst max cpu range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			FROM worsts
+			ORDER BY worsts.total_max_cpu_time_ms DESC
+				), 
+				max_logical_reads_worst AS (
+			SELECT TOP 1 'Your worst max logical read range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			FROM worsts
+			ORDER BY worsts.total_max_logical_io_reads_mb DESC
+				), 
+				max_physical_reads_worst AS (
+			SELECT TOP 1 'Your worst max physical read range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			FROM worsts
+			ORDER BY worsts.total_max_physical_io_reads_mb DESC
+				), 
+				max_logical_writes_worst AS (
+			SELECT TOP 1 'Your worst max logical write range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			FROM worsts
+			ORDER BY worsts.total_max_logical_io_writes_mb DESC
+				), 
+				max_memory_worst AS (
+			SELECT TOP 1 'Your worst max memory range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			FROM worsts
+			ORDER BY worsts.total_max_query_max_used_memory_mb DESC
+				), 
+				max_logbytes_worst AS (
+			SELECT TOP 1 'Your worst max log bytes range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			FROM worsts
+			ORDER BY worsts.total_max_log_bytes_mb DESC
+				), 
+				max_tempdb_worst AS (
+			SELECT TOP 1 'Your worst max tempdb range was on ' + worsts.worst_date + ' between ' + worsts.worst_start_time + ' and ' + worsts.worst_end_time + '.' AS msg
+			FROM worsts
+			ORDER BY worsts.total_max_tempdb_space DESC
 				)
 			INSERT #warning_results ( CheckID, Priority, FindingsGroup, Finding, URL, Details )
-			SELECT 1002, 255, 'Worsts', 'Worst Duration', 'N/A', duration_worst.msg
+			/*averages*/
+            SELECT 1002, 255, 'Worsts', 'Worst Avg Duration', 'N/A', duration_worst.msg
 			FROM duration_worst
 			UNION ALL
-			SELECT 1002, 255, 'Worsts', 'Worst CPU', 'N/A', cpu_worst.msg
+			SELECT 1002, 255, 'Worsts', 'Worst Avg CPU', 'N/A', cpu_worst.msg
 			FROM cpu_worst
 			UNION ALL
-			SELECT 1002, 255, 'Worsts', 'Worst Logical Reads', 'N/A', logical_reads_worst.msg
+			SELECT 1002, 255, 'Worsts', 'Worst Avg Logical Reads', 'N/A', logical_reads_worst.msg
 			FROM logical_reads_worst
 			UNION ALL
-			SELECT 1002, 255, 'Worsts', 'Worst Physical Reads', 'N/A', physical_reads_worst.msg
+			SELECT 1002, 255, 'Worsts', 'Worst Avg Physical Reads', 'N/A', physical_reads_worst.msg
 			FROM physical_reads_worst
 			UNION ALL
-			SELECT 1002, 255, 'Worsts', 'Worst Logical Writes', 'N/A', logical_writes_worst.msg
+			SELECT 1002, 255, 'Worsts', 'Worst Avg Logical Writes', 'N/A', logical_writes_worst.msg
 			FROM logical_writes_worst
 			UNION ALL
-			SELECT 1002, 255, 'Worsts', 'Worst Memory', 'N/A', memory_worst.msg
+			SELECT 1002, 255, 'Worsts', 'Worst Avg Memory', 'N/A', memory_worst.msg
 			FROM memory_worst
 			UNION ALL
 			SELECT 1002, 255, 'Worsts', 'Worst Row Counts', 'N/A', rowcount_worst.msg
 			FROM rowcount_worst
 			UNION ALL
-			SELECT 1002, 255, 'Worsts', 'Worst Log Bytes', 'N/A', logbytes_worst.msg
+			SELECT 1002, 255, 'Worsts', 'Worst Avg Log Bytes', 'N/A', logbytes_worst.msg
 			FROM logbytes_worst
 			UNION ALL
-			SELECT 1002, 255, 'Worsts', 'Worst tempdb', 'N/A', tempdb_worst.msg
+			SELECT 1002, 255, 'Worsts', 'Worst Avg tempdb', 'N/A', tempdb_worst.msg
 			FROM tempdb_worst
+            UNION ALL
+            /*maxes*/
+            SELECT 1002, 255, 'Worsts', 'Worst Max Duration', 'N/A', max_duration_worst.msg
+			FROM max_duration_worst
+			UNION ALL
+			SELECT 1002, 255, 'Worsts', 'Worst Max CPU', 'N/A', max_cpu_worst.msg
+			FROM max_cpu_worst
+			UNION ALL
+			SELECT 1002, 255, 'Worsts', 'Worst Max Logical Reads', 'N/A', max_logical_reads_worst.msg
+			FROM max_logical_reads_worst
+			UNION ALL
+			SELECT 1002, 255, 'Worsts', 'Worst Max Physical Reads', 'N/A', max_physical_reads_worst.msg
+			FROM max_physical_reads_worst
+			UNION ALL
+			SELECT 1002, 255, 'Worsts', 'Worst Max Logical Writes', 'N/A', max_logical_writes_worst.msg
+			FROM max_logical_writes_worst
+			UNION ALL
+			SELECT 1002, 255, 'Worsts', 'Worst Max Memory', 'N/A', max_memory_worst.msg
+			FROM max_memory_worst
+			UNION ALL
+			SELECT 1002, 255, 'Worsts', 'Worst Max Log Bytes', 'N/A', max_logbytes_worst.msg
+			FROM max_logbytes_worst
+			UNION ALL
+			SELECT 1002, 255, 'Worsts', 'Worst Max tempdb', 'N/A', max_tempdb_worst.msg
+			FROM max_tempdb_worst
 			OPTION (RECOMPILE);
 
 

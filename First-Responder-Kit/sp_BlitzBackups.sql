@@ -14,15 +14,21 @@ ALTER PROCEDURE [dbo].[sp_BlitzBackups]
 	@WriteBackupsToListenerName NVARCHAR(256) = NULL,
     @WriteBackupsToDatabaseName NVARCHAR(256) = NULL,
     @WriteBackupsLastHours INT = 168,
-    @VersionDate DATE = NULL OUTPUT
+    @Version     VARCHAR(30) = NULL OUTPUT,
+	@VersionDate DATETIME = NULL OUTPUT,
+    @VersionCheckMode BIT = 0
 WITH RECOMPILE
 AS
 	BEGIN
     SET NOCOUNT ON;
 	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
-	DECLARE @Version VARCHAR(30);
-	SET @Version = '2.7';
-	SET @VersionDate = '20180701';
+	
+	SELECT @Version = '3.8', @VersionDate = '20190922';
+	
+	IF(@VersionCheckMode = 1)
+	BEGIN
+		RETURN;
+	END;
 
 	IF @Help = 1 PRINT '
 	/*
@@ -64,7 +70,7 @@ AS
 
     MIT License
 	
-	Copyright (c) 2017 Brent Ozar Unlimited
+	Copyright (c) 2019 Brent Ozar Unlimited
 
 	Permission is hereby granted, free of charge, to any person obtaining a copy
 	of this software and associated documentation files (the "Software"), to deal
@@ -237,7 +243,7 @@ CREATE TABLE #Warnings
 
 IF NOT EXISTS(SELECT * FROM sys.databases WHERE name = @MSDBName)
 	BEGIN
-	RAISERROR('@MSDBName was specified, but the database does not exist.', 0, 1) WITH NOWAIT;
+	RAISERROR('@MSDBName was specified, but the database does not exist.', 16, 1) WITH NOWAIT;
 	RETURN;
 	END
 
@@ -1149,13 +1155,13 @@ DECLARE @RemoteCheck TABLE (c INT NULL);
 
 IF @WriteBackupsToDatabaseName IS NULL
 	BEGIN
-	RAISERROR('@WriteBackupsToDatabaseName can''t be NULL.', 0, 1) WITH NOWAIT
+	RAISERROR('@WriteBackupsToDatabaseName can''t be NULL.', 16, 1) WITH NOWAIT
 	RETURN;
 	END
 
 IF LOWER(@WriteBackupsToDatabaseName) = N'msdb'
 	BEGIN
-	RAISERROR('We can''t write to the real msdb, we have to write to a fake msdb.', 0, 1) WITH NOWAIT
+	RAISERROR('We can''t write to the real msdb, we have to write to a fake msdb.', 16, 1) WITH NOWAIT
 	RETURN;
 	END
 
@@ -1163,7 +1169,7 @@ IF @WriteBackupsToListenerName IS NULL
 BEGIN
 	IF @AGName IS NULL
 		BEGIN
-			RAISERROR('@WriteBackupsToListenerName and @AGName can''t both be NULL.', 0, 1) WITH NOWAIT;
+			RAISERROR('@WriteBackupsToListenerName and @AGName can''t both be NULL.', 16, 1) WITH NOWAIT;
 			RETURN;
 		END
 	ELSE
@@ -1187,7 +1193,7 @@ BEGIN
 		)
 			BEGIN
 				SET @msg = N'We need a linked server to write data across. Please set one up for ' + @WriteBackupsToListenerName + N'.';
-				RAISERROR(@msg, 0, 1) WITH NOWAIT;
+				RAISERROR(@msg, 16, 1) WITH NOWAIT;
 				RETURN;
 			END
 END
@@ -1206,7 +1212,7 @@ END
 	IF @@ROWCOUNT = 0
 		BEGIN
 		SET @msg = N'The database ' + @WriteBackupsToDatabaseName + N' doesn''t appear to exist on that server.'
-		RAISERROR(@msg, 0, 1) WITH NOWAIT
+		RAISERROR(@msg, 16, 1) WITH NOWAIT
 		RETURN;
 		END
 

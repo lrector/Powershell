@@ -27,17 +27,21 @@ ALTER PROCEDURE dbo.sp_AllNightLog_Setup
 				@FirstFullBackup BIT = 0,
 				@FirstDiffBackup BIT = 0,
 				@Help BIT = 0,
-				@VersionDate DATETIME = NULL OUTPUT
+				@Version     VARCHAR(30) = NULL OUTPUT,
+				@VersionDate DATETIME = NULL OUTPUT,
+				@VersionCheckMode BIT = 0
 WITH RECOMPILE
 AS
 SET NOCOUNT ON;
 
 BEGIN;
 
-DECLARE @Version VARCHAR(30);
-SET @Version = '2.5';
-SET @VersionDate = '20180501';;
+SELECT @Version = '3.8', @VersionDate = '20190922';
 
+IF(@VersionCheckMode = 1)
+BEGIN
+	RETURN;
+END;
 
 IF @Help = 1
 
@@ -111,7 +115,7 @@ BEGIN
 	
 	    MIT License
 		
-		Copyright (c) 2017 Brent Ozar Unlimited
+		Copyright (c) 2019 Brent Ozar Unlimited
 	
 		Permission is hereby granted, free of charge, to any person obtaining a copy
 		of this software and associated documentation files (the "Software"), to deal

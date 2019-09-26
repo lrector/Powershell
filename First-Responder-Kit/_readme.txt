@@ -1,20 +1,16 @@
-# The Free SQL Server Download Pack from Brent Ozar Unlimited
+# The Free SQL Server First Responder Kit from Brent Ozar Unlimited
 
-(C) 2018, Brent Ozar Unlimited.
+(C) 2019, Brent Ozar Unlimited.
 
 To get the latest version, visit:
 https://www.BrentOzar.com/first-aid/
 
 
 
-Hi! You've just downloaded a bunch of free stuff that we hope you find useful.
-It's our scripts, setup checklists, e-books, and posters about Microsoft SQL
-Server. We built this stuff because we needed it too - we're Brent Ozar
-Unlimited, a boutique consulting firm that focuses on making SQL Server faster
-and more reliable.
+Hi! You've just downloaded a bunch of free stuff that I hope you find useful.
+It's our scripts, setup checklists, and resources for Microsoft SQL Server.
 
-
-The posters and books are pretty self-explanatory. The scripts are:
+The scripts include:
 
 sp_Blitz - "Somebody just handed me a SQL Server. Is it in good shape?" 
 
@@ -37,5 +33,5 @@ https://www.brentozar.com/first-aid/
 
 Here's how to get support: https://www.brentozar.com/support
 
-Thanks, and we hope we helped make your job suck just a little less.
-The Humans of Brent Ozar Unlimited
+Thanks, and we hope this makes your job suck just a little less.
+Brent Ozar
